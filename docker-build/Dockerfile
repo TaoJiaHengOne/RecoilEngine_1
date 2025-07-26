@@ -3,9 +3,20 @@ FROM debian:bullseye AS mxe
 ARG mxe_version=70e31e42f0584fea37aa46a74dcaa6e4eecd4304
 ARG mxe_gcc=gcc13
 
-# 替换Debian 11 (bullseye) 源为中科大镜像
-RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list && \
-    sed -i 's|security.debian.org|mirrors.ustc.edu.cn/debian-security|g' /etc/apt/sources.list
+# 添加代理设置（根据实际代理地址修改）
+# 格式：http://用户名:密码@代理IP:端口（如果没有用户名密码则省略）
+ENV http_proxy="http://192.168.1.15:7899" \
+    https_proxy="http://192.168.1.15:7899" \
+    ftp_proxy="http://192.168.1.15:7899" 
+	
+
+# 替换 Debian 11 (bullseye) 源为中科大镜像
+RUN --mount=type=cache,target=/var/cache/apt \
+    cp /etc/apt/sources.list /etc/apt/sources.list.bak && \
+    echo "deb https://mirrors.ustc.edu.cn/debian/ bullseye main contrib non-free" > /etc/apt/sources.list && \
+    echo "deb https://mirrors.ustc.edu.cn/debian/ bullseye-updates main contrib non-free" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.ustc.edu.cn/debian/ bullseye-backports main contrib non-free" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.ustc.edu.cn/debian-security/ bullseye-security main contrib non-free" >> /etc/apt/sources.list && \
 	
 # Install MXE dependencies
 RUN apt-get update;apt-get install -y \
@@ -63,9 +74,16 @@ ENV PATH="/mxe/usr/bin:${PATH}"
 # suppress questions from apt
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 第二阶段添加Ubuntu镜像源设置
-RUN sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list && \
-    sed -i 's|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list
+# 第二阶段：设置阿里云镜像源
+RUN --mount=type=cache,target=/var/cache/apt \
+    cp /etc/apt/sources.list /etc/apt/sources.list.bak && \
+    echo "deb http://mirrors.aliyun.com/ubuntu/ $(lsb_release -cs) main restricted universe multiverse" > /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu/ $(lsb_release -cs)-security main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu/ $(lsb_release -cs)-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu/ $(lsb_release -cs)-proposed main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu/ $(lsb_release -cs)-backports main restricted universe multiverse" >> /etc/apt/sources.list && \
+    # 更新apt缓存
+    apt-get update
 
 # Install Build Dependencies (Common)
 RUN apt-get update -y; \
