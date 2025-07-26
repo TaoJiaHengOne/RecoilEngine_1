@@ -4,7 +4,7 @@ Visit the [Official Website](https://beyond-all-reason.github.io/RecoilEngine/)
 
 ### Get the engine sources
 
-    git clone https://github.com/beyond-all-reason/RecoilEngine --recursive
+    git clone https://github.com/TaoJiaHengOne/RecoilEngine_1.git --recursive
 
 Recoil is a fork and continuation of an RTS [engine](https://github.com/spring/spring) version 105.0
 
