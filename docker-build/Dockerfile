@@ -59,6 +59,10 @@ ENV PATH="/mxe/usr/bin:${PATH}"
 # suppress questions from apt
 ENV DEBIAN_FRONTEND=noninteractive
 
+# 第二阶段添加Ubuntu镜像源设置
+RUN sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    sed -i 's|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list
+
 # Install Build Dependencies (Common)
 RUN apt-get update -y; \
     apt-get install --fix-missing -y \
