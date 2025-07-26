@@ -3,6 +3,10 @@ FROM debian:bullseye AS mxe
 ARG mxe_version=70e31e42f0584fea37aa46a74dcaa6e4eecd4304
 ARG mxe_gcc=gcc13
 
+# 替换Debian 11 (bullseye) 源为中科大镜像
+RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list && \
+    sed -i 's|security.debian.org|mirrors.ustc.edu.cn/debian-security|g' /etc/apt/sources.list
+	
 # Install MXE dependencies
 RUN apt-get update;apt-get install -y \
         autoconf \
@@ -58,6 +62,10 @@ ENV PATH="/mxe/usr/bin:${PATH}"
 
 # suppress questions from apt
 ENV DEBIAN_FRONTEND=noninteractive
+
+# 第二阶段添加Ubuntu镜像源设置
+RUN sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    sed -i 's|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list
 
 # Install Build Dependencies (Common)
 RUN apt-get update -y; \
