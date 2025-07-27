@@ -1,10 +1,22 @@
+# Windows 编译流程
+1. 安装Windows的DockerHub 且安装一个Linux子系统 DockerHub 设置一下docker命令在子系统中可以使用
+2. 克隆仓库 git clone https://github.com/TaoJiaHengOne/RecoilEngine_1.git --recursive
+3. DockerFile 中修改一下代理地址
+4. 在git根目录运行下面的代码 克隆原始仓库tag
+>    git remote add upstream https://github.com/beyond-all-reason/spring.git
+>    git fetch upstream --tags
+5. 根据文档进行编译
 # Recoil is an open source real time strategy game engine
 
 Visit the [Official Website](https://beyond-all-reason.github.io/RecoilEngine/)
 
 ### Get the engine sources
-
     git clone https://github.com/TaoJiaHengOne/RecoilEngine_1.git --recursive
+### 对于自己Fock的项目需要克隆一下原始仓库的tag 否则无法正常编译
+```shell
+git remote add upstream https://github.com/beyond-all-reason/spring.git
+git fetch upstream --tags
+```
 
 Recoil is a fork and continuation of an RTS [engine](https://github.com/spring/spring) version 105.0
 
