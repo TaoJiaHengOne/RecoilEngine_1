@@ -82,6 +82,7 @@ docker run -it --rm \
     -e CMAKE_BUILD_PARALLEL_LEVEL \
     $image \
     bash -c '
+git config --global --add safe.directory "*"
 set -e
 echo "$@"
 cd /build/src/docker-build-v2/scripts
