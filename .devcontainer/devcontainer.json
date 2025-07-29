@@ -1,0 +1,28 @@
+{
+	"name": "BAR Engine Development",
+
+	// 直接指定您本地已有的或者远程仓库中的镜像
+	"image": "ghcr.io/beyond-all-reason/recoil-build-amd64-windows:latest",
+
+	// [可选但推荐] 为了避免每次都重新安装，可以创建一个数据卷来持久化插件等
+	"mounts": [
+		"source=vscode-extensions,target=/root/.vscode-server/extensions,type=volume"
+	],
+
+	// 在容器启动后，自动为VS Code安装C++插件
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-vscode.cpptools-extension-pack"
+			]
+		}
+	},
+	
+	// 挂载您的项目源码
+	"workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+	"workspaceFolder": "/workspace",
+
+	// 保持容器运行的参数
+	"runArgs": ["--init"],
+	"shutdownAction": "stopContainer"
+}

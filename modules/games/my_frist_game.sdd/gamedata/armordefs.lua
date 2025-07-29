@@ -1,0 +1,2 @@
+local armorDefs = {}
+return armorDefs

@@ -1,4 +1,6 @@
-return {
+Spring.Echo("exec units/tank_1.lua")
+
+local def = {
     tank_1 = {
         name = "tank_1",
         objectname = "tank_1.blend.s3o",
@@ -13,7 +15,7 @@ return {
         -- ================= 移动属性 (这是实现“移动”的关键) =================
         -- 引擎会根据这些值自动处理移动，你不需要写代码
         canMove = true, -- 该单位是否可以移动
-        movementClass = "TANK_LIGHT", -- 移动类型，决定了地形适应性
+        movementClass = "ATANK3", -- 移动类型，决定了地形适应性
         maxVelocity = 2.5, -- 最大速度 (单位：elmos/秒)
         acceleration = 0.1, -- 加速度
         brakeRate = 0.2, -- 刹车率
@@ -32,3 +34,5 @@ return {
         },
     }
 }
+
+return def
