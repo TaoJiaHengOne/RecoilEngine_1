@@ -1372,11 +1372,20 @@ void CGroundMoveType::ChangeSpeed(float newWantedSpeed, bool wantReverse, bool f
 			// the pathfinders do NOT check the entire footprint to determine
 			// passability wrt. terrain (only wrt. structures), so we look at
 			// the center square ONLY for our current speedmod
+			// 寻路器不会检查整个占地面积来判断
+			// 相对于地形的可通行性（仅检查相对于建筑物的），因此我们仅查看
+			// 中心方格来获取当前的速度系数
+
+			// 计算单位当前所在位置的地形速度修正系数。这个系数由地形类型（如公路、泥地）、坡度等因素决定。
+			// 例如，在公路上可能是 1.1 (加速)，在泥地里可能是 0.5 (减速)。
 			float groundSpeedMod = CMoveMath::GetPosSpeedMod(*md, owner->pos, flatFrontDir);
 
 			// the pathfinders don't check the speedmod of the square our unit is currently on
 			// so if we got stuck on a nonpassable square and can't move try to see if we're
 			// trying to release ourselves towards a passable square
+			// 寻路器不会检查我们单位当前所在方格的速度系数
+			// 因此，如果我们被困在一个不可通行的方格上且无法移动，尝试看看我们是否
+			// 正试图朝着一个可通行的方格移动以摆脱困境
 			if (groundSpeedMod == 0.0f)
 				groundSpeedMod = CMoveMath::GetPosSpeedMod(*md, owner->pos + flatFrontDir * SQUARE_SIZE, flatFrontDir);
 
