@@ -34,6 +34,8 @@ void GroundMoveSystem::Update() {
     // needed. Though that will be a bigger change.
 	{
 		SCOPED_TIMER("Sim::Unit::MoveType::1::UpdateTraversalPlan");
+        // 计算局部避障向量
+        // 计算要移动的路径点
         auto view = Sim::registry.view<GroundMoveType>();
         for_mt(0, view.size(), [&view](const int i){
             auto entity = view.storage<GroundMoveType>()[i];
@@ -55,6 +57,7 @@ void GroundMoveSystem::Update() {
 
         // These two sections are ST due to the numerous synced vars being changed.
         {
+            // 设置单位角度
             auto view = Sim::registry.view<ChangeHeadingEvent>();
             view.each([](ChangeHeadingEvent& event){
                 if (event.changed) {
@@ -66,6 +69,7 @@ void GroundMoveSystem::Update() {
             });
         }
         {
+            // 设置武器瞄准角度
             auto view = Sim::registry.view<ChangeMainHeadingEvent>();
             view.each([](ChangeMainHeadingEvent& event){
                 if (event.changed) {

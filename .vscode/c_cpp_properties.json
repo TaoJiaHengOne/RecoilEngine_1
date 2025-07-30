@@ -1,0 +1,18 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}/rts/**",
+                "${workspaceFolder}/AI/Skirmish/BARb/src/circuit/**"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "compilerPath": "/usr/bin/x86_64-w64-mingw32-g++"
+        }
+    ],
+    "version": 4
+}

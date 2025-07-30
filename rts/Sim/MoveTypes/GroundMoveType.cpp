@@ -677,21 +677,27 @@ void CGroundMoveType::UpdatePreCollisions()
 }
 
 void CGroundMoveType::UpdateUnitPosition() {
+	// 初始化成员变量 resultantForces（合力）为零向量。这个变量用于累加本帧所有使单位移动的力/位移，
+	// 包括引擎自身的推力、来自碰撞的推力等。在函数开始时清零，确保每次计算都是从一个干净的状态开始。
 	resultantForces = ZeroVector;
-
+	// 这是一个守护条件。如果单位当前正处于“打滑”状态（例如，被爆炸击中后不受控制地滑动），
+	// 它的移动完全由物理模拟（在 UpdateSkid 函数中处理）决定。因此，这里直接 return，跳过所有常规的、受控的移动逻辑。
 	if (owner->IsSkidding()) return;
 
  	switch (setHeading) {
+		// 当 FollowPath 函数确定单位需要沿着路径移动时，它会将 setHeading 设置为此值。
  		case HEADING_CHANGED_MOVE:
  			// ChangeHeading(setHeadingDir);
 			ChangeSpeed(maxWantedSpeed, WantReverse(waypointDir, flatFrontDir));
- 			setHeading = HEADING_CHANGED_NONE;
+ 			setHeading = HEADING_CHANGED_NONE; // 将状态标志重置为“无变化”，防止在下一帧重复执行此逻辑。
  			break;
+		// 当 FollowPath 发现单位已经到达目标或没有路径可走时，会设置此状态
 		case HEADING_CHANGED_STOP:
 	// 		SetMainHeading();
 			ChangeSpeed(0.0f, false);
 			setHeading = HEADING_CHANGED_NONE;
 			break;
+		// 当 UpdateOwnerAccelAndHeading 检测到单位被眩晕或正在建造时，会设置此状态。
 		case HEADING_CHANGED_STUN:
 			ChangeSpeed(0.0f, false);
 			setHeading = HEADING_CHANGED_NONE;
@@ -748,6 +754,8 @@ bool CGroundMoveType::Update()
 void CGroundMoveType::UpdateOwnerAccelAndHeading()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 检查单位是否处于“眩晕”状态。如果单位被EMP武器击中，它会暂时失能，无法移动或执行任何动作。
+	// 检查单位是否仍处于“建造中”的状态。建造中的单位（纳米框架）是固定的，不能移动。
 	if (owner->IsStunned() || owner->beingBuilt) {
 		setHeading = HEADING_CHANGED_STUN;
 		return;
@@ -1037,13 +1045,17 @@ void CGroundMoveType::UpdateTraversalPlan() {
 	earlyNextWayPoint = nextWayPoint;
 
 	// Check whether the new path is ready.
+	// 如何下一个路径准备好了
 	if (nextPathId != 0) {
+		// 找到下一个路径点 如果没有路径点 返回(-1, -1, -1)
 		float3 tempWaypoint = pathManager->NextWayPoint(owner, nextPathId, 0,   owner->pos, std::max(WAYPOINT_RADIUS, currentSpeed * 1.05f), true);
 
 		// a non-temp answer tells us that the new path is ready to be used.
+		// 如果返回的路径点合法
 		if (tempWaypoint.y != (-1.f)) {
 			// if the unit has switched to a raw move since the new path was requested then don't
 			// try to redirect onto the new path.
+			// 如果单位在请求新路径之后，已经切换到了“原始移动”(raw move)模式，那么就不要尝试将其重定向到这条新路径上。
 			if (!useRawMovement) {
 				// switch straight over to the new path
 				earlyCurrWayPoint = tempWaypoint;
@@ -1069,32 +1081,43 @@ void CGroundMoveType::UpdateTraversalPlan() {
 }
 
 void CGroundMoveType::UpdateObstacleAvoidance() {
+	// 如果单位被眩晕或正在建造中，则不进行任何操作
 	if (owner->IsStunned() || owner->beingBuilt)
 		return;
 
+	// 如果单位正处于玩家的第一人称控制下，则不进行任何操作
 	if (owner->UnderFirstPersonControl())
 		return;
-
+	// 获取单位在水平面上的前向向量
 	const float3&  ffd = flatFrontDir;
+	// 判断单位是否需要倒车
 	auto wantReverse = WantReverse(waypointDir, ffd);
+	// 计算原始的期望方向（朝向路径点，考虑倒车）
 	const float3  rawWantedDir = waypointDir * Sign(int(!wantReverse));
-
+	// 调用核心避障函数，并混合方向
 	GetObstacleAvoidanceDir(mix(ffd, rawWantedDir, !atGoal));
 }
 
-bool CGroundMoveType::FollowPath(int thread)
+// int thread - 当前执行此代码的线程ID。这在多线程寻路请求中很有用。
+// 返回值 bool - 函数返回一个布尔值，表示单位在当前帧是否想要倒车 (true 表示要倒车)。
+bool CGroundMoveType::FollowPath(int thread) 
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 初始化一个局部变量 wantReverse 为 false。这个变量将在函数末尾作为返回值，并在此过程中被更新。
 	bool wantReverse = false;
-
-	if (WantToStop()) {
+	// 检查单位是否应该停止移动。WantToStop() 在单位没有路径 (pathID == 0) 且处于“原始移动”模式且已到达路径终点时返回 true
+	if (WantToStop()) {// 处理停止移动的情况
+		// 如果要停止，就将当前和下一个路径点的 y 坐标设置为 -1.0f。
+		// 在引擎的其他部分，y == -1.0f 是一个特殊的标记，表示这是一个无效或临时的路径点
 		earlyCurrWayPoint.y = -1.0f;
 		earlyNextWayPoint.y = -1.0f;
-
+		// 设置状态标志 setHeading。这个标志会在稍后的 UpdateUnitPosition 函数中被识别，并触发单位的减速逻辑，使其速度降为零。
 		setHeading = HEADING_CHANGED_STOP;
+		// 事件标记为已发生。
+		// 另一个系统会监听这个事件，并执行相应的逻辑，比如让单位朝向其“主航向”（mainHeading）目标。
 		auto& event = Sim::registry.get<ChangeMainHeadingEvent>(owner->entityReference);
 		event.changed = true;
-	} else {
+	} else { // 核心路径跟随逻辑
 		#ifdef PATHING_DEBUG
 		if (DEBUG_DRAWING_ENABLED) {
 			bool printMoveInfo = (selectedUnitsHandler.selectedUnits.size() == 1)
@@ -1117,13 +1140,17 @@ bool CGroundMoveType::FollowPath(int thread)
 			}
 		}
 		#endif
-
+		// (单位当前位置)
 		const float3& opos = owner->pos;
+		// (单位当前速度)
 		const float3& ovel = owner->speed;
+		// (单位水平前方向量)
 		const float3&  ffd = flatFrontDir;
+		// (当前目标路径点)
 		const float3&  cwp = earlyCurrWayPoint;
-
+		// 将上一帧计算的到路径点的距离保存到 prevWayPointDist
 		prevWayPointDist = currWayPointDist;
+		// 计算单位当前位置与当前路径点在XZ平面上的新距离，并更新 currWayPointDist。
 		currWayPointDist = earlyCurrWayPoint.distance2D(opos);
 
 		{
@@ -1137,16 +1164,36 @@ bool CGroundMoveType::FollowPath(int thread)
 			//   units moving faster than <minGoalDist> elmos per frame might overshoot their goal
 			//   the last two atGoal conditions will just cause flatFrontDir to be selected as the
 			//   "wanted" direction when this happens
+			// 注意：
+			// 使用 owner->pos 而非 currWayPoint（即与 atEndOfPath 不同）
+			// 如果我们的第一个指令是建造指令，那么目标半径会被设置为我们的建造范围
+			// 且我们不能安全地增加公差（否则单位可能在仍处于范围外时停止移动，导致无法开始建造）
+			// 移动速度超过每帧 <minGoalDist> 埃尔莫斯的单位可能会越过其目标
+			// 当这种情况发生时，最后两个 atGoal 条件将仅导致 flatFrontDir 被选为 "期望" 方向
+
+			// 计算单位当前位置与最终目标点 goalPos 距离的平方。
 			const float curGoalDistSq = (opos - goalPos).SqLength2D();
+			// 计算“最小目标距离”的平方。这是一个动态的容差范围。
+			// 这是一个宏，检查单位当前的命令是否是移动或战斗命令。
 			const float minGoalDistSq = (UNIT_HAS_MOVE_CMD(owner))?
+				// 如果单位是移动命令，并且它似乎卡住了（numIdlingSlowUpdates > 0），那么就动态地放大这个容差范围。
+				// 这是一种“解卡”机制：如果单位在目标附近徘徊但就是无法精确到达，就放宽标准让它认为已经到达，从而可以继续执行下一个命令。
 				Square((goalRadius + extraRadius) * (numIdlingSlowUpdates + 1)):
-				Square((goalRadius + extraRadius)                             );
+				Square((goalRadius + extraRadius));
+			// 计算与速度相关的目标距离平方。大致等于单位下一帧能移动的距离
 			const float spdGoalDistSq = Square(currentSpeed * 1.05f);
-
+			// 条件1 (主要条件): 如果单位与最终目标的距离小于（或等于）我们计算出的动态容差范围，就认为它到达了。
+			// |= 是“或等于”，意味着只要 atGoal 变为 true，它就不会再变回 false。
 			atGoal |= (curGoalDistSq <= minGoalDistSq);
+			//  条件2 (过冲判断 - 前进时): 这个条件用于处理高速单位可能“冲过”目标点的情况。
+			//  单位必须离目标很近。
+			//  单位必须是正在前进, 
+			//  目标点必须仍在单位的前方。, 
+			//  在下一帧的预测位置 opos + ovel，目标点将会在单位的后方或正好在旁边
 			atGoal |= ((curGoalDistSq <= spdGoalDistSq) && !reversing && (ffd.dot(goalPos - opos) > 0.0f && ffd.dot(goalPos - (opos + ovel)) <= 0.0f));
+			// 条件3 (过冲判断 - 倒车时): 逻辑与条件2完全相同，只是方向相反，用于处理倒车时冲过目标点的情况。
 			atGoal |= ((curGoalDistSq <= spdGoalDistSq) &&  reversing && (ffd.dot(goalPos - opos) < 0.0f && ffd.dot(goalPos - (opos + ovel)) >= 0.0f));
-
+			// 如果单位到达了最终目标点 (atGoal)，那么它必然也到达了路径的终点 (atEndOfPath)。
 			atEndOfPath |= atGoal;
 
 			#ifdef PATHING_DEBUG
@@ -1177,20 +1224,26 @@ bool CGroundMoveType::FollowPath(int thread)
 			#endif
 		}
 
-		if (!atGoal) {
+		if (!atGoal) { // 如果还没到终点
+			// 如果单位正在移动 (idling 为 false)，就减少“空闲计数器
 			numIdlingUpdates -= ((numIdlingUpdates >                  0) * (1 - idling));
+			//  如果单位卡住了 (idling 为 true)，就增加“空闲计数器”。这个计数器在 SlowUpdate 中被用来判断是否需要重新寻路或宣告寻路失败
 			numIdlingUpdates += ((numIdlingUpdates < SPRING_MAX_HEADING) *      idling );
 		}
 
 		// An updated path must be re-evaluated.
+		//  这是一个特殊情况。atEndOfPath 可能因为到达了路径的最后一个路径点而为 true，但单位离真正的 goalPos 可能还有一段距离。
 		if (atEndOfPath && !atGoal)
+			// 在这种情况下，我们询问寻路管理器，当前的路径是否被更新过。如果路径没有被更新，atEndOfPath 保持 true；
+			// 如果寻路器在我们行进过程中给了一条新路径，atEndOfPath 就变回 false，让单位继续沿新路径前进。
 			atEndOfPath = !pathManager->PathUpdated(pathID);
 
 		// atEndOfPath never becomes true when useRawMovement, except via StopMoving
 		if (!atEndOfPath && !useRawMovement) {
+			// 这个函数会检查单位是否已经足够接近当前的路径点，如果是，就从寻路管理器获取下一个路径点作为新的目标。这是路径跟随的核心驱动力。
 			SetNextWayPoint(thread);
 		} else {
-			if (atGoal){
+			if (atGoal){ //  如果已经到达路径终点 (atEndOfPath 和 atGoal为 true)
 				#ifdef PATHING_DEBUG
 				if (DEBUG_DRAWING_ENABLED) {
 					bool printMoveInfo = (selectedUnitsHandler.selectedUnits.size() == 1)
@@ -1200,17 +1253,23 @@ bool CGroundMoveType::FollowPath(int thread)
 					}
 				}
 				#endif
+				// 设置 pathingArrived 标志。这个标志会在下一轮更新的 UpdatePreCollisions 中被检测到，
+				// 并触发 Arrived() 函数，正式宣告移动任务完成。
 				pathingArrived = true;
 			}
 		}
-
+		// 在请求路径点之后再设置方向；方向不应为空向量
+		// 不要比较 y 分量，因为它们通常不同，只有 x 和 z 分量重要
 		// set direction to waypoint AFTER requesting it; should not be a null-vector
 		// do not compare y-components since these usually differ and only x&z matter
+
+		// 计算出从当前位置 opos 指向当前路径点 cwp 的归一化方向向量，并存入 waypointDir 成员变量。
 		SetWaypointDir(cwp, opos);
 
 		//ASSERT_SYNCED(waypointVec);
 		//ASSERT_SYNCED(waypointDir);
-
+		// 调用 WantReverse 函数，这是一个复杂的启发式函数，它会比较“原地转身180度再前进”和“直接倒车”到达路径点的预估时间，
+		// 来决定是否应该倒车。结果存入 wantRevers
 		wantReverse = WantReverse(waypointDir, ffd);
 
 		// apply obstacle avoidance (steering), prevent unit from chasing its own tail if already at goal
@@ -1219,12 +1278,17 @@ bool CGroundMoveType::FollowPath(int thread)
 
 		// const float3& modWantedDir = GetObstacleAvoidanceDir(mix(ffd, rawWantedDir, (!atGoal) && (wpProjDists.x > wpProjDists.y || wpProjDists.z < 0.995f)));
 
+		// 获取修正后的期望方向。注意，这里直接使用了 lastAvoidanceDir。
+		// 这是因为真正的方向计算（包括调用 GetObstacleAvoidanceDir）已经在 UpdateTraversalPlan -> UpdateObstacleAvoidance 中提前完成了，
+		// 并将结果存放在了 lastAvoidanceDir 中。这里只是直接读取那个已经计算好的结果
 		const float3& modWantedDir = lastAvoidanceDir;
 
 		// ChangeHeading(GetHeadingFromVector(modWantedDir.x, modWantedDir.z));
 		// ChangeSpeed(maxWantedSpeed, wantReverse);
+		//  设置状态标志，告诉后续流程，单位的朝向和速度是根据移动逻辑来改变的
 		setHeading = HEADING_CHANGED_MOVE;
 		auto& event = Sim::registry.get<ChangeHeadingEvent>(owner->entityReference);
+		// 从最终的、经过避障修正的方向向量 
 		event.deltaHeading = GetHeadingFromVector(modWantedDir.x, modWantedDir.z);
 		event.changed = true;
 		// setHeadingDir = GetHeadingFromVector(modWantedDir.x, modWantedDir.z);
@@ -1267,19 +1331,32 @@ void CGroundMoveType::SetWaypointDir(const float3& cwp, const float3 &opos) {
 	}
 }
 
+/**
+ * float newWantedSpeed: 上层逻辑期望单位达到的速度。如果是 0.0f，表示希望单位停下。
+ * bool wantReverse: 单位是否应该倒车。
+ * bool fpsMode: 单位当前是否处于玩家第一人称直接控制模式。
+ */
 void CGroundMoveType::ChangeSpeed(float newWantedSpeed, bool wantReverse, bool fpsMode)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// shortcut to specify acceleration to bring to a stop.
+	// 这是一个快捷路径 (shortcut)，用于处理“让一个已经几乎停止的单位保持停止”的情况。
 	if ((wantedSpeed = newWantedSpeed) <= 0.0f && currentSpeed < 0.01f) {
+		// 如果两个条件都满足，就直接设置加速度 deltaSpeed 为 -currentSpeed。
+		// 这会精确地抵消掉单位当前任何微小的残留速度，使其完全停下。
 		deltaSpeed = -currentSpeed;
 		return;
 	}
 
 	// first calculate the "unrestricted" speed and acceleration
+	// 初始化一个局部变量 targetSpeed。这是单位在理想情况下（没有地形、转弯等任何限制时）所能达到的最大速度。
+	// 如果 wantReverse 为 false，targetSpeed 被设置为 maxSpeed (最大前进速度)。
+	// 如果 wantReverse 为 true，targetSpeed 被设置为 maxReverseSpeed (最大倒车速度)。
 	float targetSpeed = mix(maxSpeed, maxReverseSpeed, wantReverse);
 
 	#if (WAIT_FOR_PATH == 1)
+	// 在获得实际路径之前不要移动，试图隐藏排队延迟是非常危险的，
+	// 因为单位可能会盲目地撞到物体、悬崖等（需要在 Update 中进行 QTPFS 空闲检查）
 	// don't move until we have an actual path, trying to hide queuing
 	// lag is too dangerous since units can blindly drive into objects,
 	// cliffs, etc. (requires the QTPFS idle-check in Update)
@@ -1411,6 +1488,12 @@ void CGroundMoveType::ChangeSpeed(float newWantedSpeed, bool wantReverse, bool f
  * Also updates world position of aim points, and orientation if walking over terrain slopes.
  * FIXME near-duplicate of HoverAirMoveType::UpdateHeading
  */
+/*
+* 改变所有者的朝向。
+* 同时更新瞄准点的世界位置，以及在地形斜坡上行走时的方向。
+* FIXME HoverAirMoveType::UpdateHeading 存在近乎重复的代码
+*/
+// 参数: short newHeading 这是单位的“期望航向”，是一个介于 0 和 SPRING_CIRCLE_DIVS (65535) 之间的整数，代表一个完整的圆周。上层逻辑（如寻路、避障）计算出这个值，并传递给此函数。
 void CGroundMoveType::ChangeHeading(short newHeading) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (owner->IsFlying())
@@ -1418,25 +1501,36 @@ void CGroundMoveType::ChangeHeading(short newHeading) {
 	if (owner->GetTransporter() != nullptr)
 		return;
 
+	// 将传入的“期望航向” newHeading 存储到成员变量 wantedHeading 中。这使得类的其他部分可以随时知道单位当前的目标朝向是什么
 	wantedHeading = newHeading;
+	// 如果单位的当前航向 owner->heading 已经等于期望航向 wantedHeading，那就意味着转向已经完成，不需要再做任何计算
 	if (owner->heading == wantedHeading) {
+		// 即使不需要转向，单位的 updir（上方向量）可能仍然需要更新，因为它会根据地形的坡度变化。
+		// 例如，当单位从平地开上斜坡时，它的车体会向上倾斜。这个函数就是用来更新 updir、frontdir 和 rightdir 以匹配地形的
 		owner->UpdateDirVectors(!owner->upright && owner->IsOnGround(), owner->IsInAir(), owner->unitDef->upDirSmoothing);
 		return;
 	}
 
+	// 这两行代码的核心是计算出在本帧单位应该转动的角度增量
 	#if (MODEL_TURN_INERTIA == 0)
+	// 这是一个简单的模型。它会计算出从当前朝向到目标朝向的最短路径（顺时针或逆时针），然后返回一个不超过最大转向速率 turnRate 的角度增量。
+	// 单位会立即以最大速率开始转向，也立即以最大速率停止
 	const short rawDeltaHeading = pathController.GetDeltaHeading(pathID, wantedHeading, owner->heading, turnRate);
 	#else
 	// model rotational inertia (more realistic for ships)
+	// 模拟转动惯量（使船舶运动更符合实际情况）
+	// 这个版本的 GetDeltaHeading 会考虑当前的转向速度 turnSpeed。如果单位需要开始转向，它会施加 turnAccel 来加速；
+	// 如果单位快要对准目标了，它会提前减速，以确保能平滑地停在 wantedHeading，而不是冲过头。
+	// 这对于大型单位（如舰船）的行为表现至关重要。
 	const short rawDeltaHeading = pathController.GetDeltaHeading(pathID, wantedHeading, owner->heading, turnRate, turnAccel, BrakingDistance(turnSpeed, turnAccel), &turnSpeed);
 	#endif
 	const short absDeltaHeading = rawDeltaHeading * Sign(rawDeltaHeading);
-
+	// 这是一个阈值检查，用于决定是否需要通知单位的脚本（如COB或LUA脚本）它正在转向。
 	if (absDeltaHeading >= minScriptChangeHeading)
 		owner->script->ChangeHeading(rawDeltaHeading);
-
+	// 这是真正执行旋转的函数。它将计算出的角度增量 rawDeltaHeading 加到单位的当前航向 owner->heading 上
 	owner->AddHeading(rawDeltaHeading, !owner->upright && owner->IsOnGround(), owner->IsInAir(), owner->unitDef->upDirSmoothing);
-
+	// 更新单位的方向向量 纯二维
 	flatFrontDir = (owner->frontdir * XZVector).Normalize();
 }
 
@@ -1824,16 +1918,23 @@ void CGroundMoveType::CalcSkidRot()
  * Dynamic obstacle avoidance, helps the unit to
  * follow the path even when it's not perfect.
  */
+/**
+ * 动态避障功能，有助于单位
+ * 即使在路径不够理想的情况下也能沿着路径行进。
+*/
 float3 CGroundMoveType::GetObstacleAvoidanceDir(const float3& desiredDir) {
 	#if (IGNORE_OBSTACLES == 1)
 	return desiredDir;
 	#endif
 
 	// obstacle-avoidance only needs to run if the unit wants to move
+	//  只有当单位想要移动时，才需要运行避障程序
+	//  如果要停止，就没必要进行避障计算了。它将 lastAvoidanceDir (上一帧的避障方向) 更新为单位当前的朝向 flatFrontDir，然后返回这个值，使单位保持静止时的朝向。
 	if (WantToStop())
 		return lastAvoidanceDir = flatFrontDir;
 
 	// Speed-optimizer. Reduces the times this system is run.
+	// 速度优化器。减少该系统的运行次数。
 	if ((gs->frameNum + owner->id) % modInfo.groundUnitCollisionAvoidanceUpdateRate) {
 		if (!avoidingUnits)
 			lastAvoidanceDir = desiredDir;
@@ -1841,13 +1942,13 @@ float3 CGroundMoveType::GetObstacleAvoidanceDir(const float3& desiredDir) {
 		return lastAvoidanceDir;
 	}
 
-	float3 avoidanceVec = ZeroVector;
-	float3 avoidanceDir = desiredDir;
+	float3 avoidanceVec = ZeroVector; // 这个向量将用来累加所有来自障碍物的“排斥力”或“躲避向量”。
+	float3 avoidanceDir = desiredDir; // 如果最终没有检测到任何需要躲避的障碍物，这个值就会被用作最终结果。
 
 	if (avoidingUnits)
 		avoidingUnits = false;
 
-	lastAvoidanceDir = desiredDir;
+	lastAvoidanceDir = desiredDir; // 在计算开始前，先将 lastAvoidanceDir (上一帧的最终方向)也更新为当前的期望方向。这是一个备用值，以防计算中途出现问题。
 
 	CUnit* avoider = owner;
 
@@ -1858,63 +1959,102 @@ float3 CGroundMoveType::GetObstacleAvoidanceDir(const float3& desiredDir) {
 	// do not actively avoid obstacles since that can interfere with
 	// normal waypoint steering (if the final avoidanceDir demands a
 	// turn in the opposite direction of desiredDir)
+	// 计算单位当前3D朝向与期望方向的点积。点积为负数意味着两个向量之间的夹角大于90度。
+	// 如果单位的朝向与期望方向几乎相反（例如，正在进行180度大转弯），就暂时不进行主动避障。
+	// 因为此时避障逻辑可能会干扰正常的转向行为，导致奇怪的抖动。函数直接返回上一帧的方向。
 	if (avoider->frontdir.dot(desiredDir) < 0.0f)
 		return lastAvoidanceDir;
 
+	// 用于混合向量的权重。
 	static constexpr float AVOIDER_DIR_WEIGHT = 1.0f;
 	static constexpr float DESIRED_DIR_WEIGHT = 0.5f;
+	// 用于与上一帧结果进行平滑插值的alpha值。
 	static constexpr float LAST_DIR_MIX_ALPHA = 0.7f;
+	// 点积结果如果小于这个值，意味着障碍物与单位朝向的夹角大于120度，即障碍物在单位的侧后方，可以忽略。
 	static const     float MAX_AVOIDEE_COSINE = math::cosf(120.0f * math::DEG_TO_RAD);
 
 	// now we do the obstacle avoidance proper
 	// avoider always uses its never-rotated MoveDef footprint
 	// note: should increase radius for smaller turnAccel values
+	// 计算本次避障的检测半径
+	// 这个半径是动态的，与单位的当前速度 currentSpeed 成正比。速度越快，需要看得越远，提前反应。avoider->radius * 2.0f 提供了一个基础半径
 	const float avoidanceRadius = std::max(currentSpeed, 1.0f) * (avoider->radius * 2.0f);
+	// 获取避障者自身的碰撞半径。这个半径基于 MoveDef 的占地面积计算，比单位模型的视觉半径更准确。
 	const float avoiderRadius = avoiderMD->CalcFootPrintMinExteriorRadius();
 
 	MoveTypes::CheckCollisionQuery avoiderInfo(avoider);
 
 	QuadFieldQuery qfQuery;
 	qfQuery.threadOwner = ThreadPool::GetThreadNum();
+	// 请求在 avoider->pos (单位位置) 周围 avoidanceRadius (检测半径) 内的所有“固体”对象。
 	quadField.GetSolidsExact(qfQuery, avoider->pos, avoidanceRadius, 0xFFFFFFFF, CSolidObject::CSTATE_BIT_SOLIDOBJECTS);
-
+	// 遍历quadField找到邻近物体
 	for (const CSolidObject* avoidee: *qfQuery.solids) {
+	
 		const MoveDef* avoideeMD = avoidee->moveDef;
 		const UnitDef* avoideeUD = dynamic_cast<const UnitDef*>(avoidee->GetDef());
 
 		// cases in which there is no need to avoid this obstacle
+		// 不能自己躲避自己。
 		if (avoidee == owner)
 			continue;
 		// do not avoid statics (it interferes too much with PFS)
+		// 为空说明是静态物体（如岩石、建筑残骸），这个系统不处理静态障碍物，因为它们应该由全局路径规划器PFS来处理。
 		if (avoideeMD == nullptr)
 			continue;
 		// ignore aircraft (or flying ground units)
+		// 不躲避空中的或正在飞行的单位。
 		if (avoidee->IsInAir() || avoidee->IsFlying())
 			continue;
+		// 如果根据移动定义，这个障碍物是非阻塞的（例如可以穿过）
 		if (CMoveMath::IsNonBlocking(avoidee, &avoiderInfo))
 			continue;
+		// 或者可以被我们的单位碾压，那就不需要躲避。
 		if (!CMoveMath::CrushResistant(*avoiderMD, avoidee))
 			continue;
-
+		// 是否是可移动单位
 		const bool avoideeMobile  = (avoideeMD != nullptr);
+		// 是否是可以被推动的单位
 		const bool avoideeMovable = (avoideeUD != nullptr && !static_cast<const CUnit*>(avoidee)->moveType->IsPushResistant());
-
+		// 这里的speed是单位的当前速度向量。
+		// 预测了避障者（avoider）和障碍物（avoidee）在下一帧的大致位置。然后计算这两个预测位置之间的向量。
+		// 这样做是为了提前反应，躲避对方将要到达的位置，而不是它现在所在的位置。
+		// avoidee -> avoider
 		const float3 avoideeVector = (avoider->pos + avoider->speed) - (avoidee->pos + avoidee->speed);
 
 		// use the avoidee's MoveDef footprint as radius if it is mobile
 		// use the avoidee's Unit (not UnitDef) footprint as radius otherwise
+		// 获取障碍物的碰撞半径。
+		// 如果是可移动单位 (avoideeMobile 为 true)，就使用 MoveDef 中定义的、更精确的占地面积（footprint）来计算半径。
+		// 否则（如果是静态物体），就使用其作为 CSolidObject 的通用半径计算方法。
 		const float avoideeRadius = avoideeMobile?
 			avoideeMD->CalcFootPrintMinExteriorRadius():
 			avoidee->CalcFootPrintMinExteriorRadius();
+		
+		// 计算我们自己和障碍物的半径之和。如果我们的中心点与对方中心点的距离小于这个值，就意味着发生了碰撞。
 		const float avoidanceRadiusSum = avoiderRadius + avoideeRadius;
+		// 计算双方的总质量。
 		const float avoidanceMassSum = avoider->mass + avoidee->mass;
+		// 计算一个质量缩放因子，用于调整躲避反应的强度
+		// 如果障碍物是可移动的，这个因子就是障碍物的质量占总质量的比例。这意味着，
+		// 当我们躲避一个比我们重得多的单位时，我们会做出更强的躲避反应（因为对方不太可能为我们让路）。反之，躲避轻单位时反应会弱一些。
+		// 如果障碍物是静态的，缩放因子为 1.0f，意味着我们会对其做出最大强度的躲避反应（因为它完全不会移动）
 		const float avoideeMassScale = avoideeMobile? (avoidee->mass / avoidanceMassSum): 1.0f;
+		// 计算预测的相对位置向量的长度的平方。在编程中，比较距离的平方比比较距离本身要快，因为它避免了开方（sqrt）运算。
 		const float avoideeDistSq = avoideeVector.SqLength();
+		// 计算实际的预测距离，并加上一个很小的数 0.01f 来防止后续计算中出现除以零的错误。
 		const float avoideeDist   = math::sqrt(avoideeDistSq) + 0.01f;
 
 		// do not bother steering around idling MOBILE objects
 		// (since collision handling will just push them aside)
+		// 适用于那些既能自己移动、又能被我们推开的障碍物
 		if (avoideeMobile && avoideeMovable) {
+			// !avoiderMD->avoidMobilesOnPath: 第一个条件是检查我们自己的 MoveDef 是否设置了“不在路径上躲避移动单位”。如果设置了，就忽略。
+			// !avoidee->IsMoving() && avoidee->allyteam == avoider->allyteam: 如果障碍物是一个没有在移动的、并且是盟友的单位，我们就忽略它。
+			// 为什么？ 想象一下在一条狭窄的通道里，一队坦克正在前进，前面的坦克停了一下。如果后面的坦克执行标准的避障逻辑，它会尝试向左或向右绕。
+			// 但在狭窄通道里，这可能会导致它撞墙或者与旁边的单位发生更复杂的碰撞，最终导致整个队伍卡死。
+			// 这个规则的意图是：对于静止的盟友，我们不主动进行转向躲避，而是直接开过去，
+			// 依赖更底层的物理碰撞系统（HandleObjectCollisions）去推动它。这样可以更有效地解决单位“礼让”造成的交通堵塞。
 			if (!avoiderMD->avoidMobilesOnPath || (!avoidee->IsMoving() && avoidee->allyteam == avoider->allyteam))
 				continue;
 		}
@@ -1925,17 +2065,26 @@ float3 CGroundMoveType::GetObstacleAvoidanceDir(const float3& desiredDir) {
 		//   one frame and false the next (after avoider has turned) causing the
 		//   avoidance vector to oscillate --> units with turnInPlace = true will
 		//   slow to a crawl as a result
+		// 释提醒了一个潜在问题：如果这个角度阈值设置得太窄（例如90度），
+		// 单位在转向时可能会导致障碍物“时而进入，时而离开”躲避范围，从而引起躲避向量的抖动，导致单位移动不流畅甚至减速。
+
+		// 忽略那些位于我们（avoider）侧后方的障碍物
+		// avoideeVector 是从障碍物预测的下一帧位置指向我们预测的下一帧位置的向量。
+		// / avoideeDist 将其归一化，得到一个纯粹的方向向量。
+		// 前面的负号 - 将这个向量反转，现在它代表了从我们指向障碍物的方向。
 		if (avoider->frontdir.dot(-(avoideeVector / avoideeDist)) < MAX_AVOIDEE_COSINE)
 			continue;
-
+		// 距离过滤。忽略那些虽然在前方，但离得太远的障碍物。
 		if (avoideeDistSq >= Square(std::max(currentSpeed, 1.0f) * GAME_SPEED + avoidanceRadiusSum))
 			continue;
+		// 如果障碍物离我们的距离，比我们离最终目标点 goalPos 的距离还要远，那么我们通常不需要现在就担心它。我们会在沿着路径前进的过程中自然地处理它。
 		if (avoideeDistSq >= avoider->pos.SqDistance2D(goalPos))
 			continue;
 
 		// if object and unit in relative motion are closing in on one another
 		// (or not yet fully apart), then the object is on the path of the unit
 		// and they are not collided
+		// 调试可视化
 		if (DEBUG_DRAWING_ENABLED) {
 			if (selectedUnitsHandler.selectedUnits.find(owner->id) != selectedUnitsHandler.selectedUnits.end()){
 				geometryLock.lock();
@@ -1943,15 +2092,23 @@ float3 CGroundMoveType::GetObstacleAvoidanceDir(const float3& desiredDir) {
 				geometryLock.unlock();
 			}
 		}
-
+		// 这里需要使用几何画板验证一下
+		// 通过GGB验证结果规律 如果单位在前方向量左边值为1 否则为 -1 
 		float avoiderTurnSign = -Sign(avoidee->pos.dot(avoider->rightdir) - avoider->pos.dot(avoider->rightdir));
+		// 通过GGB验证结果规律 如果单位在前方向量左边值为1 否则为 -1
 		float avoideeTurnSign = -Sign(avoider->pos.dot(avoidee->rightdir) - avoidee->pos.dot(avoidee->rightdir));
 
 		// for mobile units, avoidance-response is modulated by angle
 		// between avoidee's and avoider's frontdir such that maximal
 		// avoidance occurs when they are anti-parallel
+		// avoidanceCosAngle: 计算我们和障碍物朝向的点积，即朝向夹角的余弦。-1 表示迎头相对，+1 表示完全同向。
 		const float avoidanceCosAngle = std::clamp(avoider->frontdir.dot(avoidee->frontdir), -1.0f, 1.0f);
+		// 这是角度响应强度。1.0f - avoidanceCosAngle 这个表达式使得当两个单位迎头相向时（cos=-1），响应值最大（为2）；同向时（cos=1），
+		// 响应值最小（为0）。* int(avoideeMobile) 表示这个角度调制只对可移动的单位生效。最后的 + 0.1f 保证了总有一个最小的响应值。
 		const float avoidanceResponse = (1.0f - avoidanceCosAngle * int(avoideeMobile)) + 0.1f;
+		// 这是距离衰减强度。avoideeDist / (5.0f * avoidanceRadiusSum) 计算了一个相对距离。
+		// 当单位很近时，这个比值接近0，avoidanceFallOff 接近1.0（强度最大）。
+		// 当单位远离时，比值增大，avoidanceFallOff 接近0（强度减弱）。5.0f * 表示衰减的有效范围大约是双方半径和的5倍。
 		const float avoidanceFallOff  = (1.0f - std::min(1.0f, avoideeDist / (5.0f * avoidanceRadiusSum)));
 
 		// if parties are anti-parallel, it is always more efficient for
@@ -1962,18 +2119,34 @@ float3 CGroundMoveType::GetObstacleAvoidanceDir(const float3& desiredDir) {
 		// (this is also true for the parallel situation, but there the
 		// degeneracy only occurs when one of the parties is behind the
 		// other and can be ignored)
+		// 如果双方是反平行的，那么对两者而言，
+		// 朝相同的局部空间方向转弯（根据相对物体位置，要么都右转 / R，要么都左转 / L）总是更高效的，
+		// 但存在一定的朝向范围，在该范围内双方的转向方向并不相同
+		//
+		// （这一点在平行情况下同样成立，但在平行时，
+		// 只有当其中一方位于另一方后方时才会出现这种退化情况，这种情况可以忽略不计）
+
+		// 如果 avoidanceCosAngle < 0.0f，说明两个单位大体上是相向而行。
+		// 这时，为了避免双方都向对方内侧转向而“顶牛”，代码尝试让双方选择一个统一的转向方向（都向自己的左边或都向自己的右边）。
 		if (avoidanceCosAngle < 0.0f)
 			avoiderTurnSign = std::max(avoiderTurnSign, avoideeTurnSign);
-
+		// 根据 avoiderTurnSign 决定一个基础的躲避方向，即我们自己的左方向或右方向。
 		avoidanceDir = avoider->rightdir * AVOIDER_DIR_WEIGHT * avoiderTurnSign;
+		// avoidanceVec += ...: 然后，将这个基础方向向量乘以我们刚刚计算出的所有强度因子：
+		// avoidanceResponse（角度响应）、
+		// avoidanceFallOff（距离衰减）
+		// 以及 avoideeMassScale（质量比例）。
+		// 这个最终计算出的、带有权重的向量被加到 avoidanceVec 上。avoidanceVec 会累加所有障碍物产生的这种“推力”。
 		avoidanceVec += (avoidanceDir * avoidanceResponse * avoidanceFallOff * avoideeMassScale);
-
+		// 设置状态标志。
 		if (!avoidingUnits)
 			avoidingUnits = true;
 	}
 
 	// use a weighted combination of the desired- and the avoidance-directions
 	// also linearly smooth it using the vector calculated the previous frame
+	// 采用期望方向和避障方向的加权组合, 同时使用上一帧计算出的向量对其进行线性平滑处理
+	// 两次线性混合 第一次期望方向和避障方向, 第二次 第一次计算结果与上一次避障方向混合
 	avoidanceDir = (mix(desiredDir, avoidanceVec, DESIRED_DIR_WEIGHT)).SafeNormalize();
 	avoidanceDir = (mix(avoidanceDir, lastAvoidanceDir, LAST_DIR_MIX_ALPHA)).SafeNormalize();
 
@@ -1992,7 +2165,7 @@ float3 CGroundMoveType::GetObstacleAvoidanceDir(const float3& desiredDir) {
 			geometryLock.unlock();
 		}
 	}
-
+	// 最终平滑方向
 	return (lastAvoidanceDir = avoidanceDir);
 }
 

@@ -37,7 +37,7 @@ public:
 	static constexpr int HEADING_CHANGED_NONE = 0; // 航向未改变
 	static constexpr int HEADING_CHANGED_MOVE = 1; // 因移动而改变航向
 	static constexpr int HEADING_CHANGED_STOP = 2; // 因停止而改变航向
-	static constexpr int HEADING_CHANGED_STUN = 3; // 因眩晕而改变航向
+	static constexpr int HEADING_CHANGED_STUN = 3; // 因眩晕或者建造而改变航向
 
 	// 用于反射系统的成员数据结构，将成员变量的哈希值映射到其指针
 	struct MemberData {
@@ -251,9 +251,9 @@ private:
 	float3 earlyNextWayPoint; // （多线程中）提前计算的下一个路径点
 
 	float3 waypointDir;      // 指向当前路径点的方向向量
-	float3 flatFrontDir;     // 单位在水平面上的前方向量
+	float3 flatFrontDir;     // 单位在水平面上的前方向量 2D
 	float3 lastAvoidanceDir; // 上一次障碍物躲避的方向
-	float3 mainHeadingPos;   // 主航向的目标位置
+	float3 mainHeadingPos;   // 主航向的目标位置, 应该是武器[0] 应该瞄准的目标位置
 	float3 skidRotVector;    // 与打滑方向正交的向量，用于旋转
 
 	float turnRate = 0.1f;    // 最大转向速率 (角度单位/帧)

@@ -1,0 +1,41 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "远程启动",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-windows/install/spring.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${fileDirname}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/x86_64-w64-mingw32-gdb",
+            "miDebuggerServerAddress": "192.168.1.15:1234",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "将反汇编风格设置为 Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+            "sourceFileMap": {
+                // 键 (key): 是调试器报告的错误路径前缀。
+                //           这里我们假设编译是在 /workspace/build-windows 下进行的。
+                // 值 (value): 是您 VS Code 工作区中对应的正确路径前缀。
+                "/build/src": "${workspaceFolder}"
+            },
+        }
+
+    ]
+}
