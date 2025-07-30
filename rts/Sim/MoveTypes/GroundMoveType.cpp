@@ -1385,50 +1385,74 @@ void CGroundMoveType::ChangeSpeed(float newWantedSpeed, bool wantReverse, bool f
 			// trying to release ourselves towards a passable square
 			// 寻路器不会检查我们单位当前所在方格的速度系数
 			// 因此，如果我们被困在一个不可通行的方格上且无法移动，尝试看看我们是否
-			// 正试图朝着一个可通行的方格移动以摆脱困境
+			// 正试图朝着一个可通行的方格移动以摆脱困境 当前程序时Unit的正前方
 			if (groundSpeedMod == 0.0f)
 				groundSpeedMod = CMoveMath::GetPosSpeedMod(*md, owner->pos + flatFrontDir * SQUARE_SIZE, flatFrontDir);
-
+			
 			const float curGoalDistSq = (owner->pos - goalPos).SqLength2D();
+			// 计算刹车距离的平方。BrakingDistance 是一个辅助函数，它根据当前速度 currentSpeed 和减速率 decRate 估算出单位完全停下来需要滑行的距离。
 			const float minGoalDistSq = Square(BrakingDistance(currentSpeed, decRate));
 
-			const float3& waypointDifFwd = waypointDir;
-			const float3  waypointDifRev = -waypointDifFwd;
-
+			const float3& waypointDifFwd = waypointDir; // 路径点的前进方向
+			const float3  waypointDifRev = -waypointDifFwd; // 路径点的后退方向
+			// 根据是否倒车 来决定方向
 			const float3& waypointDif = mix(waypointDifFwd, waypointDifRev, reversing);
+			// 当前方向与路径点方向的差值
 			const short turnDeltaHeading = owner->heading - GetHeadingFromVector(waypointDif.x, waypointDif.z);
-
+			// 判断是否应该开始刹车
+			// 只有当这是最后一个或唯一的命令时才刹车。如果后面还有其他移动命令，单位应该直接开往下一个目标，而不是在当前目标点停下。
 			const bool startBraking = (UNIT_CMD_QUE_SIZE(owner) <= 1 && curGoalDistSq <= minGoalDistSq && !fpsMode);
 
 			float maxSpeedToMakeTurn = std::numeric_limits<float>::infinity();
 
-			if (!fpsMode && turnDeltaHeading != 0) {
+			if (!fpsMode && turnDeltaHeading != 0) { // 不是第一人称模式 且旋转差值不等于0
 				// only auto-adjust speed for turns when not in FPS mode
+				// 仅在非 FPS 模式下为转弯自动调整速度
+				// 计算单位需要转动的总角度，单位是“度”
 				const float reqTurnAngle = math::fabs(180.0f * short(owner->heading - wantedHeading) / SPRING_MAX_HEADING);
+				// 计算单位在一帧内最多能转动多少度
+				// turnRate: 单位的最大转向速率（以引擎内部单位/帧 表示）
 				const float maxTurnAngle = (turnRate / SPRING_CIRCLE_DIVS) * 360.0f;
-
+				// 获取当前状态下（前进或倒车）的理论最大速度
 				const float turnMaxSpeed = mix(maxSpeed, maxReverseSpeed, reversing);
-				      float turnModSpeed = turnMaxSpeed;
+				// 初始化一个“转弯修正速度”变量，其初始值为理论最大速度。我们接下来要做的就是根据转弯的需要来降低这个值
+				float turnModSpeed = turnMaxSpeed;
 
 				if (reqTurnAngle != 0.0f)
+					// axTurnAngle / reqTurnAngle: 计算“单帧最大转角”与“总共需要转的角度”的比率
+					// 如果是急转弯 (reqTurnAngle 很大)，这个比率会很小
+					// 如果是缓和的转弯 (reqTurnAngle 很小)，这个比率会很大
+					// 将这个比率限制在 [0.1, 1.0] 的范围内。这意味着即使是再急的弯，速度最多也只会降到原来的10%。
+					// 将这个计算出的比例乘到 turnModSpeed 上。转弯越急，这个比例越小，turnModSpeed 也就越低。
 					turnModSpeed *= std::clamp(maxTurnAngle / reqTurnAngle, 0.1f, 1.0f);
 
-				if (waypointDir.SqLength() > 0.1f) {
-					if (!ud->turnInPlace) {
+				// 这段代码根据单位是否能“原地转向”来应用不同的减速逻辑。
+				if (waypointDir.SqLength() > 0.1f) { // 这是一个安全检查，确保我们有一个合法的、非零的路径点方向向量。
+					if (!ud->turnInPlace) { // 如果单位不能原地转向（像汽车一样，需要有前进速度才能转弯）
 						// never let speed drop below TIPSL, but limit TIPSL itself to turnMaxSpeed
+						// 将 targetSpeed 限制在一个范围内。它不能低于一个最小转弯速度 turnInPlaceSpeedLimit（TIPSL），
+						// 也不能高于我们上面计算出的 turnModSpeed。这确保了单位既会为了转弯而减速，又不会因为减速太多而完全停下来导致无法转弯。
 						targetSpeed = std::clamp(turnModSpeed, std::min(ud->turnInPlaceSpeedLimit, turnMaxSpeed), turnMaxSpeed);
 					} else {
+						// reqTurnAngle > ud->turnInPlaceAngleLimit: 检查需要转的角度是否大于一个预设的阈值。
+						// 只有当转弯角度足够大时，才会将 targetSpeed 向 turnModSpeed 进行混合（即降低速度）。对于很小的角度调整，坦克不需要减速
 						targetSpeed = mix(targetSpeed, turnModSpeed, reqTurnAngle > ud->turnInPlaceAngleLimit);
 					}
 				}
-
+				// 这是一个特殊情况的处理。如果单位已经到达了路径的最后一个路径点。
+				// 此时，单位必须强制减速，以确保能够精确地停在最终目标点，而不是因为速度过快而开始绕着目标点“转圈”。
 				if (atEndOfPath) {
 					// at this point, Update() will no longer call SetNextWayPoint()
 					// and we must slow down to prevent entering an infinite circle
 					// base ftt on maximum turning speed
+					// 此时，Update () 将不再调用 SetNextWayPoint ()
+					// 因此我们必须减速，以避免进入无限循环
+					// 于最大转弯速度确定基础
 					const float absTurnSpeed = turnRate;
+					// 估算单位转动半圈（360度）大约需要多少帧
 					const float framesToTurn = SPRING_CIRCLE_DIVS / absTurnSpeed;
-
+					// (currWayPointDist * math::PI) / framesToTurn: 这是一个基于“匀速圆周运动”模型的估算。 这个公式需要仔细研究一下 
+					// 它计算出一个速度值，如果单位以此速度前进，它刚好能在一个“转半圈”的时间内走完到目标点的距离。
 					targetSpeed = std::min(targetSpeed, (currWayPointDist * math::PI) / framesToTurn);
 				}
 			}
@@ -1437,14 +1461,29 @@ void CGroundMoveType::ChangeSpeed(float newWantedSpeed, bool wantReverse, bool f
 			// result in the unit having to loop back around, but we need to make sure it doesn't
 			// go too fast looping back around that it crashes right back into the same building
 			// and trigger a looping behaviour.
+			// 路径点发生移动，是因为它与建筑物发生了碰撞。这种情况可能会导致单位不得不掉头折返，
+			// 但我们需要确保单位在折返时不会速度过快，以免再次撞上同一建筑物，从而触发循环往复的行为。
+
+			// 这是一个入口条件。limitSpeedForTurning 是一个成员变量，在单位与静态物体发生碰撞时，它会被设置为一个大于0的数值（例如2）。
+			// 它就像一个临时计时器或状态标志，告诉单位在接下来的几帧需要“特别小心地”转弯。每经过一个路径点，这个值会减1。
 			if (limitSpeedForTurning > 0) {
+				//  计算单位的移动方向符号（前进为+1，倒车为-1）。虽然在这个特定的代码块里 dirSign 没有被直接使用，但它通常用于需要区分前进和后退的计算中。
 				const int dirSign = Sign(int(!reversing));
 				short idealHeading = GetHeadingFromVector(waypointDir.x, waypointDir.z);
+				// 计算出单位的当前航向与理想航向之间的角度差。这就是单位总共需要转动的角度。
 				short offset = idealHeading - owner->heading;
-
+				// 取单位的最大转向速率 turnRate 的绝对值。使用 std::max 确保这个值至少是一个很小的正数，以防止在下一步的除法中出现除以零的错误。
 				const float absTurnSpeed = std::max(0.0001f, math::fabs(turnRate));
+				// 算完成整个转向（转动 offset 那么多角度）所需要的时间，单位是“游戏帧”。这个估算是通过 总角度 / 每帧能转动的角度 得出的。
 				const float framesToTurn = std::max(0.0001f, math::fabs(offset / absTurnSpeed));
-
+				// 这是这个代码块的核心。它计算出了一个极其严格的“最大允许转弯速度”。
+				// 逻辑: 它基于简单的物理公式 速度 = 距离 / 时间。
+				// currWayPointDist: 这是单位到下一个路径点的距离。
+				// framesToTurn: 这是单位完成转向所需要的时间。
+				// currWayPointDist / framesToTurn: 这个除法计算出的速度，能确保单位只有在刚好完成转向之后，才会到达路径点。
+				// * (.95f): 乘以0.95是为了增加一个5%的安全边际，让减速更加保守。
+				// std::max(0.01f, ...): 确保这个速度至少是一个很小的正值。
+				// 最终结果: maxSpeedToMakeTurn 被赋予了一个非常低的速度值，强制单位在碰撞后以“爬行”的速度进行转向，从而保证安全。
 				maxSpeedToMakeTurn = std::max(0.01f, (currWayPointDist / framesToTurn) * (.95f));
 
 				// bool printMoveInfo = (selectedUnitsHandler.selectedUnits.size() == 1)
@@ -1470,11 +1509,25 @@ void CGroundMoveType::ChangeSpeed(float newWantedSpeed, bool wantReverse, bool f
 			//   disallow changing speed (except to zero) without
 			//   a path if not in FPS mode (FIXME: legacy PFS can
 			//   return path when none should exist, mantis3720)
+			// 调整上层命令的期望速度。如果地形有速度加成（groundSpeedMod > 1.0），就相应地提高 wantedSpeed。
+			// 这样做是为了让 std::min(targetSpeed, wantedSpeed) 这个比较有意义，确保单位能真正享受到地形带来的速度提升。如果地形是减速的，wantedSpeed 保持不变。
 			wantedSpeed *= std::max(groundSpeedMod, 1.0f);
+			// 将地形修正应用到我们正在计算的实际目标速度 targetSpeed 上。如果地形是泥地（例如 groundSpeedMod = 0.5），targetSpeed 就会减半。
 			targetSpeed *= groundSpeedMod;
+			// 应用刹车逻辑。startBraking 是一个布尔值。如
+			// 果它为 true (在C++中等于1)，那么 1 - startBraking 就是0，targetSpeed 会直接变为0，强制单位开始减速。
+			// 如果为 false (0)，则乘以1，targetSpeed 不变。
 			targetSpeed *= (1 - startBraking);
+			// 应用停止意图。如果单位想要停止 (WantToStop() 为 true) 
+			// 并且不在FPS模式下，那么 (1 - 1) || false 的结果是 false (0)，targetSpeed 也会变为0。
+			// 在FPS模式下，这个检查被忽略。
 			targetSpeed *= ((1 - WantToStop()) || fpsMode);
+			// targetSpeed = std::min(...): 确保 targetSpeed 不会超过上层命令给出的（经过地形加成修正后的）wantedSpeed。
 			targetSpeed = std::min(targetSpeed, wantedSpeed);
+			// 这是最后的、也是最重要的一个限制。它将经过了地形、刹车、指令等所有修正后的 targetSpeed，
+			// 与我们第一部分计算出的、极其严格的“碰撞后紧急转弯速度” maxSpeedToMakeTurn 进行比较，并取两者中的最小值。
+			// 最终效果: 安全永远是第一位的。即使在高速公路上（地形加成高），
+			// 如果单位刚刚撞了墙需要掉头，它的速度也会被强制降低到 maxSpeedToMakeTurn 这个极低的值，直到 limitSpeedForTurning 标志消失。
 			targetSpeed = std::min(targetSpeed, maxSpeedToMakeTurn);
 		} else {
 			targetSpeed = 0.0f;
