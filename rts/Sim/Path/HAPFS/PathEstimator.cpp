@@ -24,26 +24,31 @@ namespace HAPFS {
 void CPathEstimator::Init(IPathFinder* pf, unsigned int BLOCK_SIZE, PathingState* ps)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 这一步会执行所有寻路器通用的初始化逻辑，最重要的是根据传入的分辨率BLOCK_SIZE来分配该PE实例所需的节点状态缓冲区blockStates
 	IPathFinder::Init(BLOCK_SIZE);
-
+	// 接下来，函数设置该PE实例自身的各种成员变量。
 	{
+		// 计算一个常量，用于确定在地形变化时需要更新多少个宏观区块。
 		BLOCKS_TO_UPDATE = SQUARES_TO_UPDATE / (BLOCK_SIZE * BLOCK_SIZE) + 1;
 
 		nextOffsetMessageIdx = 0;
 		//nextCostMessageIdx = 0;
 
 		pathChecksum = 0;
+		// 调用CalcHash函数，根据地图、移动定义等数据生成一个唯一的哈希码。这个哈希码用于验证或命名存储预计算路径数据的文件，确保数据与当前游戏版本匹配
 		fileHashCode = CalcHash(__func__);
-
+		// 初始化两个原子计数器。这些计数器用于在多线程环境下安全地进行路径数据的预计算工作。
 		offsetBlockNum = {nbrOfBlocks.x * nbrOfBlocks.y};
 		costBlockNum = {nbrOfBlocks.x * nbrOfBlocks.y};
-
+		// 将传入的指针pf赋值给成员变量parentPathFinder。这正式建立了层级关系，
+		// 让当前PE知道它的“上级”（分辨率更高一层的寻路器）是谁。当需要进行高精度验证时，
+		// PE就会调用parentPathFinder的方法。
 		parentPathFinder = pf;
 		//nextPathEstimator = nullptr;
-
+		// 将指针指向一个共享的PathingState对象。这个对象包含了所有寻路器（不分层级、不分线程）共享的数据，如路径缓存、预计算的通行成本等
 		pathingState = ps;
 		assert(pathingState != nullptr);
-
+		// 为了性能，直接获取PathingState中节点状态缓冲区的指针并缓存起来，避免每次使用时都通过pathingState指针进行间接访问
 		psBlockStates = &pathingState->blockStates;
 		assert(psBlockStates != nullptr);
 	}

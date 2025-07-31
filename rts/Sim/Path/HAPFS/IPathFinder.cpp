@@ -26,40 +26,55 @@ static std::vector<IPathFinder*> pathFinderInstances;
 void IPathFinder::InitStatic() { pathFinderInstances.reserve(8); }
 void IPathFinder::KillStatic() { pathFinderInstances.clear  ( ); }
 
-
+/**
+ * 这个函数的核心目标是初始化一个具体的寻路器实例
+ * （无论是高分辨率的 CPathFinder 还是低分辨率的 CPathEstimator）。
+ * 它根据传入的分辨率 (_BLOCK_SIZE) 设置该实例的所有基本参数，
+ * 并为其分配进行A*搜索所必需的内存和数据结构。
+ * _BLOCK_SIZE，用于定义此寻路器实例的工作分辨率
+*/
 void IPathFinder::Init(unsigned int _BLOCK_SIZE)
 {
 	{
 		RECOIL_DETAILED_TRACY_ZONE;
+		// 这是此函数最重要的操作之一，决定了寻路器是在精细网格还是粗糙网格上工作。
 		BLOCK_SIZE = _BLOCK_SIZE;
+		// 预先计算并存储一个“块”在世界坐标中的像素尺寸，用于后续的坐标转换，提高效率。
 		BLOCK_PIXEL_SIZE = BLOCK_SIZE * SQUARE_SIZE;
-
+		// : 根据地图的总宽度 (mapDims.mapx) 和块的大小，计算出寻路网格总共有多少个块。
 		nbrOfBlocks.x = mapDims.mapx / BLOCK_SIZE;
 		nbrOfBlocks.y = mapDims.mapy / BLOCK_SIZE;
-
+		// 将用于A*搜索的起始块和目标块索引初始化为0。
 		mStartBlockIdx = 0;
 		mGoalBlockIdx = 0;
-
+		// 将记录最近目标点的启发式函数值（H值）初始化为0.0
 		mGoalHeuristic = 0.0f;
-
+		// 将搜索相关的计数器（最大搜索块数、已测试块数）重置为0。
 		maxBlocksToBeSearched = 0;
 		testedBlocks = 0;
-
+		// 获取当前已创建的寻路器实例总数，并将这个值作为当前实例的唯一索引 
+		// instanceIndex。这个索引在后续分配共享资源（如 nodeStateBuffers）时至关重要。
 		instanceIndex = pathFinderInstances.size();
 	}
 	{
+		// 清空用于存储开放列表节点的内存缓冲池 openBlockBuffer
 		openBlockBuffer.Clear();
 		// handled via AllocStateBuffer
 		// blockStates.Clear();
 		// done in ResetSearch
 		// openBlocks.Clear();
+		// 清空 dirtyBlocks 向量。这个向量用于记录上一次搜索中被修改过的节点，以便在下一次搜索前能高效地重置它们的状态
 		dirtyBlocks.clear();
 	}
 	{
+		// 将当前正在初始化的这个寻路器实例的指针 (this) 添加到一个全局的静态向量 pathFinderInstances 中。这使得系统可以集中管理所有已创建的寻路器实例。
 		pathFinderInstances.push_back(this);
 	}
-
+	// 调用一个关键的辅助函数，它负责为当前寻路器实例分配或重用一个巨大的节点状态缓冲区 (PathNodeStateBuffer)，
+	// 并将其赋值给 blockStates 成员变量。这是为A*搜索准备“草稿纸”的核心步骤。
 	AllocStateBuffer();
+	// 调用 ResetSearch 函数，执行最后的准备工作。它会清空开放列表优先队列 openBlocks，
+	// 并为 dirtyBlocks 向量预留内存，使寻路器完全准备好执行第一次搜索。
 	ResetSearch();
 }
 
@@ -75,10 +90,16 @@ void IPathFinder::Kill()
 void IPathFinder::AllocStateBuffer()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 代码检查当前实例的ID是否超出了缓冲池的当前大小。
+	// 如果是（例如，游戏刚启动，这是第一个被初始化的寻路器），emplace_back() 就会在池中创建一个新的、空的 PathNodeStateBuffer。
+	// 这确保了每个寻路器实例在池中都有一个对应的存储槽
 	if (instanceIndex >= nodeStateBuffers.size())
 		nodeStateBuffers.emplace_back();
-
+	// 找到池中属于当前实例的那个 PathNodeStateBuffer，并调用其 Clear() 方法。
+	// 这会重置缓冲区内部的状态，确保即使这个缓冲区是从上一局游戏中回收再利用的，也不会有任何残留的旧数据。
 	nodeStateBuffers[instanceIndex].Clear();
+	// Resize() 方法会确保这个缓冲区的容量足以容纳当前寻路器网格中的所有节点（nbrOfBlocks 是网格的二维尺寸(降采样后的网格)）。
+	// 如果缓冲区的容量已经足够，这个操作可能会很快完成；如果不够，它会重新分配内存以满足需求。
 	nodeStateBuffers[instanceIndex].Resize(nbrOfBlocks, int2(mapDims.mapx, mapDims.mapy));
 
 	// steal memory, returned in dtor
