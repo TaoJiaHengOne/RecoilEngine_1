@@ -709,6 +709,7 @@ void CGame::PostLoadSimulation(LuaParser* defsParser)
 	//   checksum (over heightmap + blockmap, not raw archive)
 	mapDamage = IMapDamage::InitMapDamage();
 	pathManager = IPathManager::GetInstance(modInfo.pathFinderSystem);
+	LOG_I(LOG_LEVEL_INFO, "Path Find System mode = %d", modInfo.pathFinderSystem);
 	moveDefHandler.PostSimInit();
 
 	// load map-specific features

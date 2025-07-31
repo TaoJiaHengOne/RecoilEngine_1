@@ -192,7 +192,7 @@ const char* CSMFMapFile::GetFeatureTypeName(int typeID) const
 
 void CSMFMapFile::GetInfoMapSize(const char* name, MapBitmapInfo* info) const
 {
-
+	LOG_L(L_DEBUG, "GetInfoMapSize map size x = %d, y = %d", header.mapx, header.mapy);
 	switch (hashString(name)) {
 		case hashString("height"): { *info = MapBitmapInfo(header.mapx + 1, header.mapy + 1); } break;
 		case hashString("grass" ): { *info = MapBitmapInfo(header.mapx / 4, header.mapy / 4); } break;

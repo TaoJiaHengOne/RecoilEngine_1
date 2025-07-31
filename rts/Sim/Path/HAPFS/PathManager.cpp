@@ -67,15 +67,18 @@ CPathManager::CPathManager()
 , pathHeatMap(nullptr)
 , nextPathID(0)
 {
+	// 调用 IPathFinder 接口的静态初始化函数。这通常用于设置所有寻路器都需要的共享数据或状态。
 	IPathFinder::InitStatic();
+	// 调用 CPathFinder 实现类的静态初始化函数，用于准备高精度寻路器特有的静态数据（例如，方向移动成本数组 PF_DIRECTION_COSTS）
 	CPathFinder::InitStatic();
-
+	// 调用 CPathManager 自身的静态初始化函数，完成管理器级别的设置
 	InitStatic();
-
+	// 获取 流场图（Flow Map）的全局唯一实例（Singleton模式），并将其指针存入成员变量 pathFlowMap。
+	// 流场图用于模拟单位的集体移动趋势以影响寻路成本。
 	pathFlowMap = PathFlowMap::GetInstance();
 	gPathHeatMap.Init(PATH_HEATMAP_XSCALE, PATH_HEATMAP_ZSCALE);
 	pathHeatMap = &gPathHeatMap;
-
+	// 为存储路径的容器 pathMap 预先分配1024个元素的空间。这是一种性能优化，可以避免在游戏开始阶段频繁地因添加新路径而重新分配内存。
 	constexpr size_t initialPathMapSize = 1024;
 	pathMap.reserve(initialPathMapSize);
 
@@ -87,40 +90,55 @@ CPathManager::CPathManager()
 void CPathManager::InitStatic()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 从一个名为 ThreadPool 的线程池管理器中获取当前系统可用的CPU线程数量，并将这个数值赋给静态成员变量 pathFinderGroups
 	pathFinderGroups = ThreadPool::GetNumThreads();
 
 	LOG("TK CPathManager::InitStatic: %d threads available", pathFinderGroups);
 
 	// pathFinders[i] = pfMemPool.alloc<CPathFinder>(true);
-
+	// 计算需要创建的寻路器总数。PATH_ALL_LEVELS 是一个常量，代表每个线程组需要多少个不同层级的寻路器（例如，高、中、低分辨率，共3个）。
+	// pathFinderGroups 是线程数
 	const size_t pathFinderCount = PATH_ALL_LEVELS * pathFinderGroups;
+	//  计算所有中、低分辨率寻路器（CPathEstimator）所需的内存
 	const size_t medLowResMem = sizeof(CPathEstimator) * pathFinderGroups;
+	// 计算所有高分辨率寻路器（CPathFinder）所需的内存
 	const size_t maxResMem = sizeof(CPathFinder) * pathFinderGroups;
-
+	// 将所有层级的寻路器内存加起来，得到最终需要分配的总字节数
 	const size_t totalMem = medLowResMem*PATH_ESTIMATOR_LEVELS + maxResMem;
-
+	// 这几行在计算每种类型的寻路器在未来将要分配的大内存块内的起始偏移地址。这是一种手动内存布局，确保不同类型的寻路器在内存中是连续存放的
 	const size_t lowResPEsOffset = 0;
 	const size_t medResPEsOffset = lowResPEsOffset + medLowResMem;
 	const size_t maxResPFsOffset = medResPEsOffset + medLowResMem;
-
+	// 它调用全局的 operator new 来分配一块原始的、未初始化的内存，大小为 totalMem 字节。
+	// 这块内存还没有包含任何有效的C++对象，只是一个字节序列。
+	// 返回的 void* 指针被 reinterpret_cast 转换为 char*，以便于进行后续的字节级别的地址计算。
 	char* baseAddr = reinterpret_cast<char*>(::operator new(totalMem));
+	// 这三行代码将之前分配的大内存块进行“分割”。
+	// 它将 lowResPEs、medResPEs 和 maxResPFs 这三个指针分别指向大内存块中对应的偏移地址。
+	// reinterpret_cast 在这里告诉编译器：“请将这个原始内存地址视为一个指向 CPathEstimator 或 CPathFinder 数组的指针”。
 	lowResPEs = reinterpret_cast<CPathEstimator*>( baseAddr + lowResPEsOffset );
 	medResPEs = reinterpret_cast<CPathEstimator*>( baseAddr + medResPEsOffset );
 	maxResPFs = reinterpret_cast<CPathFinder*>   ( baseAddr + maxResPFsOffset );
-
+	// 这是一个非常重要的步骤，使用了 C++ 的 “Placement New” 语法。
+	// 循环为每个线程组 i 创建一套寻路器
+	// new (&lowResPEs[i]) CPathEstimator(); 这行代码并不会分配新内存。相反，
+	// 它在 &lowResPEs[i] 这个已经分配好的内存地址上调用 CPathEstimator 的构造函数，从而在原地构造一个对象。
 	for (int i = 0; i<pathFinderGroups; ++i){
 		new (&lowResPEs[i]) CPathEstimator();
 		new (&medResPEs[i]) CPathEstimator();
 		new (&maxResPFs[i]) CPathFinder();
 	}
-
+	// 创建一个临时的 std::vector，用于存放指向所有寻路器基类 IPathFinder 的指针。它的总大小为之前计算的 pathFinderCount
 	std::vector<IPathFinder*> newPathFinders(pathFinderCount);
+	// 这个循环将所有新创建的寻路器对象的地址有序地存放到 newPathFinders 向量中。
+	// 存放的索引是根据线程组ID和分辨率层级计算的，这样就可以通过一个简单的公式 threadNum * 3 + level 快速定位到任何一个寻路器
 	for (int i = 0; i<pathFinderGroups; ++i){
 		newPathFinders[i*PATH_ALL_LEVELS + PATH_LOW_RES] = &lowResPEs[i];
 		newPathFinders[i*PATH_ALL_LEVELS + PATH_MED_RES] = &medResPEs[i];
 		newPathFinders[i*PATH_ALL_LEVELS + PATH_MAX_RES] = &maxResPFs[i];
 	}
-
+	// 使用 std::move 将临时向量 newPathFinders 的内容高效地转移给类的静态成员 
+	// pathFinders。move 操作避免了昂贵的逐元素复制，只是交换了内部指针，效率很高
 	pathFinders = std::move(newPathFinders);
 
 	constexpr size_t memoryPageSize = 4096;

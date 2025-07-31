@@ -35,6 +35,7 @@ set GDB_PATH="H:\CLion 2024.2.0.1\bin\gdb\win\x64\bin\gdbserver.exe"
 echo %GDB_PATH%
 
 rem 启动
-%GDB_PATH% 0.0.0.0:1234 spring.exe 
+rem --- %GDB_PATH% 0.0.0.0:1234 spring.exe ---
+spring.exe
 rem --- 运行结束后返回 ---
 cd ../../

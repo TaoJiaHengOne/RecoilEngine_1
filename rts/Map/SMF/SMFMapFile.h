@@ -5,7 +5,7 @@
 
 #include "System/FileSystem/FileHandler.h"
 #include "SMFFormat.h"
-
+#include "System/Log/ILog.h"
 #include <string>
 #include <vector>
 

@@ -82,6 +82,9 @@ void GroundMoveSystem::Update() {
         }
     }
 	{
+        // 设置单位位置
+        // 内部会计算一个符合物理规律的速度 且会检测是否与静态障碍物以及地形碰撞
+        // 如果碰撞会求解一个新的贴着边移动向量
         auto view = Sim::registry.view<GroundMoveType>();
         for_mt(0, view.size(), [&view](const int i){
             auto entity = view.storage<GroundMoveType>()[i];

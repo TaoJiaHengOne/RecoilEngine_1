@@ -433,23 +433,47 @@ static float3 CalcSpeedVectorInclGravity(const CUnit* owner, const CGroundMoveTy
 
 	return newSpeedVector;
 }
-
+// 根据单位当前的实际速度、最大速度限制以及本帧的加速度，计算出一个新的、符合物理规则的速度向量。
+// 计算不考虑重力
+// const CUnit* owner: 指向所属单位的指针。
+// const CGroundMoveType* mt: 指向单位移动类型实例的指针。
+// float hAcc: 本帧的水平加速度（deltaSpeed）。这是由 ChangeSpeed 函数计算得出的。
+// float vAcc: 本帧的垂直加速度。对于地面单位，这个值通常是0，除非有特殊效果。
 static float3 CalcSpeedVectorExclGravity(const CUnit* owner, const CGroundMoveType* mt, float hAcc, float vAcc) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// LuaSyncedCtrl::SetUnitVelocity directly assigns
 	// to owner->speed which gets overridden below, so
 	// need to calculate hSpeedScale from it (not from
 	// currentSpeed) directly
+	// 这段注释非常关键。它解释了为什么函数直接使用 owner->speed 而不是 moveType->currentSpeed。
+	// 因为 Lua 脚本可以通过 SetUnitVelocity 直接修改单位的 owner->speed 向量。
+	// 如果我们使用 currentSpeed（它只在 ChangeSpeed 中更新），就会忽略掉 Lua 脚本施加的速度变化。
+	// 所以，为了正确处理来自脚本的外部速度干预，必须直接读取 owner->speed。
 
+
+	// 这是一个提前停止的快捷路径。
+	// mt->GetWantedSpeed() == 0.f: 检查上层逻辑是否希望单位停止
+	// math::fabs(owner->speed.w) - hAcc <= 0.01f: 
+	// 检查单位当前的速率（owner->speed.w 是速度向量的长度）是否已经非常小，并且本帧的加速度 hAcc 也无法使其显著增加。
 	if (mt->GetWantedSpeed() == 0.f && math::fabs(owner->speed.w) - hAcc <= 0.01f)
 		return ZeroVector;
 	else {
-		float vel = owner->speed.w;
-		float maxSpeed = owner->moveType->GetMaxSpeed();
-		if (vel > maxSpeed) {
+		float vel = owner->speed.w; // 获取单位当前的速率（标量）。
+		float maxSpeed = owner->moveType->GetMaxSpeed(); //  获取单位定义中的最大允许速度。
+		// 这个 if 块处理一种特殊情况：单位当前的速率超过了它自身引擎能达到的最大速度。
+		// 这种情况通常是由于外力（如爆炸冲击波、Lua脚本设置）造成的。
+		if (vel > maxSpeed) { 
 			// Once a unit is travelling faster than their maximum speed, their engine power is no longer sufficient to counteract
 			// the drag from air and rolling resistance. So reduce their velocity by these forces until a return to maximum speed.
+			// 注释: 解释了接下来的逻辑：当单位超速时，它的引擎动力不足以维持这个速度，
+			// 所以我们需要模拟空气阻力和滚动摩擦力，使其速度自然衰减，直到回到其最大速度。
 			float rollingResistanceCoeff = owner->unitDef->rollingResistanceCoefficient;
+			// 这是核心的速度衰减计算。
+			// owner->GetDragAccelerationVec(...): 这个函数计算出由于空气阻力和滚动摩擦力产生的负加速度向量（一个指向速度反方向的向量）。
+			// owner->speed + ...: 将这个负加速度应用到当前的速度向量上，得到一个衰减后的新速度向量。
+			// .Length(): 计算这个新速度向量的长度（速率）。
+			// std::max(maxSpeed, ...): 确保衰减后的速度不会低于单位自身的最大速度 maxSpeed。
+			// 这样可以防止单位因为摩擦力而减速到比自身引擎能维持的速度还慢。
 			vel = std::max(maxSpeed,
 				(owner->speed +
 				owner->GetDragAccelerationVec(
@@ -460,6 +484,13 @@ static float3 CalcSpeedVectorExclGravity(const CUnit* owner, const CGroundMoveTy
 				)).Length()
 			);
 		}
+		// return (...): 这是函数的最终返回。
+		// vel * Sign(int(!mt->IsReversing())):
+		//    vel 是我们刚刚计算出的、可能经过超速衰减修正后的速率。
+		//    Sign(...) 返回 +1（前进时）或 -1（倒车时）。
+		//    这一部分计算出了单位在施加本帧加速度之前的“基础速度”标量。
+		// ... + hAcc: 将本帧的加速度 hAcc（由 ChangeSpeed 计算得出）加到基础速度上。
+		// 将最终计算出的速度标量，乘以单位当前的前方向量 owner->frontdir，得到最终的新速度向量。这个向量将被 UpdateOwnerPos 用来更新单位的位置。
 		return (owner->frontdir * (vel * Sign(int(!mt->IsReversing())) + hAcc));
 	}
 }
@@ -3551,79 +3582,144 @@ bool CGroundMoveType::UpdateDirectControl()
 	return wantReverse;
 }
 
-
+// 这个函数是单位移动的最终物理仲裁者。
+// 在它被调用之前，上层逻辑已经计算出了一个“理想的”移动向量 moveDir。
+// UpdatePos 的核心职责就是验证这个理想移动是否可行，即检查它是否会导致单位穿过不可通行的地形或静态障碍物（如建筑、岩石）。
+// 如果不可行，它会计算出一个修正后的、实际可行的移动向量。
+// const CUnit* unit: 指向需要更新位置的单位
+// const float3& moveDir: 输入参数，代表本帧理想的移动位移向量
+// float3& resultantMove: 输出参数。这个函数会把最终计算出的、实际可行的位移向量写入这个变量
+// int thread: 当前的线程ID，用于多线程环境下的缓存
+// const: 表示这个函数不会修改 CGroundMoveType 类的成员变量
 void CGroundMoveType::UpdatePos(const CUnit* unit, const float3& moveDir, float3& resultantMove, int thread) const {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 保存单位在本帧开始时的位置
 	const float3 prevPos = unit->pos;
+	// 计算出理想情况下，单位移动后应该到达的新位置。
 	const float3 newPos = unit->pos + moveDir;
+	// 始化输出参数。函数首先做一个乐观的假设：移动是完全可行的。
+	// 因此，将输出 resultantMove 初始化为理想的 moveDir。后续的代码如果检测到碰撞，将会修改这个 resultantMove 的值。
 	resultantMove = moveDir;
 
 	// The series of tests done here will benefit from using the same cached results.
 	MoveDef* md = unit->moveDef;
+	// 获取一个线程专属的临时编号。这是一个重要的性能优化。在同一帧内，对于同一个线程，这个编号是唯一的。
+	// 后续的碰撞检测函数会用这个编号作为“缓存键”，将对静态障碍物的检测结果缓存起来。
+	// 这样，如果多个单位在同一帧内对同一个建筑进行碰撞检测，这个昂贵的计算只需要执行一次。
 	int tempNum = gs->GetMtTempNum(thread);
-
+	// 创建一个“碰撞查询对象”。这是一个结构体，它打包了进行碰撞检测所需的所有关于移动单位的信息（如 MoveDef、当前位置、是否在水中等）。
+	// 这样做的好处是，后续调用碰撞检测函数时，只需要传递这一个对象，而不需要传递一大串零散的参数，使代码更整洁、高效。
 	MoveTypes::CheckCollisionQuery virtualObject(unit);
+	// 创建一个“查询状态跟踪器”。这个对象专门用于处理复杂的潜水单位，它会跟踪单位的水下状态变化，并决定是否需要刷新碰撞缓存（即更新 tempNum）。
 	MoveDefs::CollisionQueryStateTrack queryState;
-
+	// 检查单位是否是“复杂潜水单位”（即可以潜入水下并有自定义水线的单位）。
 	const bool isSubmersible = md->IsComplexSubmersible();
+	// 这是一个关键的性能优化。如果单位不是潜水单位（即普通的地面单位），那么在进行水平移动的碰撞检测时，我们不需要考虑它和障碍物在Y轴（高度）上的关系。
+	// 调用 DisableHeightChecks() 可以让后续的碰撞检测算法跳过所有与高度相关的计算，从而大幅提升性能。
 	if (!isSubmersible)
 		virtualObject.DisableHeightChecks();
-
+	// 它的功能非常简单，就是将一个世界坐标 float3 pos 转换为它所在的地图方格的二维整数坐标 int2。
+	// 这是通过将X和Z坐标分别除以每个方格的大小 SQUARE_SIZE 并取整来实现的。
 	auto toMapSquare = [](float3 pos) {
 		return int2({int(pos.x / SQUARE_SIZE), int(pos.z / SQUARE_SIZE)});
 	};
-
+	// 它将一个二维的地图方格坐标 int2 square 转换为一个一维的索引ID。
+	// 这是典型的将二维数组坐标映射到一维数组索引的计算方法，mapDims.mapx 是地图在X方向上的宽度。
 	auto toSquareId = [](int2 square) {
 		return (square.y * mapDims.mapx) + square.x;
 	};
-
+	// 这个函数的核心任务是回答一个问题：“一个单位移动到 pos 这个位置是否安全？” 它通过执行一系列检查来得出结论。
 	auto isSquareOpen = [this, md, unit, &tempNum, thread, &toMapSquare, &virtualObject, &queryState, &isSubmersible](float3 pos) {
+		// 边界检查: 首先，它将世界坐标 pos 转换为地图方格坐标 checkSquare，
+		// 然后检查这个方格是否在地图边界之内。如果超出了边界，直接返回 false
 		int2 checkSquare = toMapSquare(pos);
+
 		if ( checkSquare.x < 0
 			|| checkSquare.y < 0
 			|| checkSquare.x >= mapDims.mapx
 			|| checkSquare.y >= mapDims.mapy) {
 				return false;
 			}
-		
+		// 潜水单位特殊处理: 如果单位是“复杂潜水单位”，情况会更复杂，因为它的碰撞状态取决于它的深度和水的状态。
 		if (isSubmersible){
+			// 这个函数会根据单位在 checkSquare 的新位置来更新 virtualObject 的内部状态（比如它的Y坐标、是否在水中等）
 			md->UpdateCheckCollisionQuery(virtualObject, queryState, checkSquare);
+			// 如果 UpdateCheckCollisionQuery 发现单位的垂直状态（如从陆地进入水中）发生了显著变化，它会设置 refreshCollisionCache 标志。
 			if (queryState.refreshCollisionCache)
 				tempNum = gs->GetMtTempNum(thread);
 		}
 
 		// separate calls because terrain is only checked for in the centre square, while
 		// static objects are checked for in the whole footprint.
+		// 最终的安全检查: 这是最关键的一步，它将地形检查和物体检查结合起来
+		// pathController.IgnoreTerrain(*md, pos): 首先检查路径控制器是否允许忽略地形（例如，单位在空中时）。
+		// || (或): 如果不忽略地形...
+		// unit->moveDef->TestMoveSquare(...): 调用 MoveDef 的函数来只检查地形。参数 true, false, true 
+		// 分别表示 testTerrain=true, testObjects=false, centerOnly=true。
+		// 这意味着它只检查单位中心点所在的那个方格的地形是否可通过（坡度、地形类型等）。
+		// && (与): 只有当地形检查通过时，才会进行物体检查。
+		// 这个函数只检查静态物体（建筑、岩石等）。
+		// 与地形检查不同，它会检查单位的整个“脚印”（footprint）覆盖的所有方格，确保没有任何一个方格被静态物体阻挡。
+		// 它使用了 tempNum 作为缓存键来提高性能。
 		bool result = ( pathController.IgnoreTerrain(*md, pos) ||
 				 unit->moveDef->TestMoveSquare(virtualObject, pos, (pos - unit->pos), true, false, true, nullptr, nullptr, thread)
 			   )
 				&& unit->moveDef->TestMovePositionForObjects(&virtualObject, pos, tempNum, thread);
-
+		// return result;: 返回最终的布尔结果。只有当地形和物体检查都通过时，result 才为 true，表示该位置是开放和安全的。
 		return result;
 	};
-
+	// 它的作用与 toMapSquare 相反，是将一个地图方格坐标 square 转换回一个世界坐标 float3。
+	// 它计算出该方格的中心点附近的一个位置（加1是为了避免边界问题），
+	// Y坐标设为0。这个函数在后续检查对角线移动时被用来获取相邻方格的世界坐标。
 	auto toPosition = [](int2 square) {
 		return float3({float(square.x * SQUARE_SIZE + 1), 0.f, float(square.y * SQUARE_SIZE + 1)});
 	};
-
+	// 获取单位移动前的位置所在的地图方格坐标。
 	const int2 prevSquare = toMapSquare(prevPos);
+	// 获取单位理想移动后的位置所在的地图方格坐标。
 	const int2 newSquare = toMapSquare(newPos);
+	// 将目标方格的二维坐标转换为一维ID。
 	const int newPosStartSquare = toSquareId(newSquare);
+	// 如果单位没有卡住，并且这次移动没有跨越到新的方格，那么就没有必要进行昂贵的碰撞检测，函数直接返回。这极大地减少了不必要的计算
 	if (!positionStuck && toSquareId(prevSquare) == newPosStartSquare) { return; }
-
+	// 对理想的目标位置 newPos 进行第一次初步安全检查。
+	// 取反。如果 isSquareOpen 返回 true（开放），那么 isSquareBlocked 就是 false（未被阻挡）
 	bool isSquareBlocked = !isSquareOpen(newPos);
+	// 只有在初步检查表明目标方格本身是开放的情况下，才需要进入这个代码块，进一步检查移动路径的问题，特别是对角线移动
 	if (!isSquareBlocked) {
+		// 计算起始方格和目标方格之间的坐标差。
 		const int2 fullDiffSquare = newSquare - prevSquare;
+		//  这是检测对角线移动的关键。如果X坐标和Z坐标都发生了变化，那就意味着单位正在尝试进行一次对角线移动（例如，从 (5,5) 移动到 (6,6)）。
 		if (fullDiffSquare.x != 0 && fullDiffSquare.y != 0) {
-
+			// 接下来的代码是专门为了防止单位“挤”过两个互为对角的障碍物的
+			// . . . .
+ 			// . A # .   A = 单位当前位置 (prevSquare)
+  			// . # D .   D = 单位目标位置 (newSquare)
+  			// . . . .   # = 障碍物
+			// 单位想从A移动到D。虽然A和D本身都是可以通过的空地，
+			// 但如果单位直接走对角线，它的身体（碰撞体积）很可能会“蹭”到或穿过那两个障碍物的角。
+			// 这段代码就是要阻止这种不合法的移动。
+			// (fullDiffSquare.x < 0) 是一个布尔表达式，如果为真（向左移动），结果是1；为假（向右移动），结果是0。
+			// 1 - (2 * 1) 等于 -1
+			// 1 - (2 * 0) 等于 +1
+			// 所以，diffSquare 最终会是一个方向向量，其分量为 (+1, +1), (+1, -1), (-1, +1) 或 (-1, -1)，精确地指明了对角线的方向
 			const int2 diffSquare{1 - (2 * (fullDiffSquare.x < 0)), 1 - (2 * (fullDiffSquare.y < 0))};
 
 			// We have a diagonal move. Make sure the unit cannot press through a corner.
+			// 计算出形成那个“角”的两个相邻方格的坐标。
+			// 回到我们的例子，newSquare 是 D。diffSquare 是 (+1, +1)
+			// checkSqrX 就是 (Dx - 1, Dy)，即 D 左边的那个 #
+			// checkSqrY 就是 (Dx, Dy - 1)，即 D 下边的那个 #
 			const int2 checkSqrX({newSquare.x - diffSquare.x, newSquare.y});
 			const int2 checkSqrY({newSquare.x, newSquare.y - diffSquare.y});
-
+			// !isSquareOpen(toPosition(checkSqrX)): 检查X方向的相邻方格是否被阻挡
+			// !isSquareOpen(toPosition(checkSqrY)): 检查Y方向的相邻方格是否被阻挡
+			// && (与): 只有当两个相邻的方格都同时被阻挡时，这次对角线移动才被最终判定为非法（isSquareBlocked 变为 true）。
+			// 如果只有一个被阻挡，单位仍然可以通过“蹭”着一个障碍物移动过去。
 			isSquareBlocked = !isSquareOpen(toPosition(checkSqrX)) && !isSquareOpen(toPosition(checkSqrY));
+			// 如果最终判定这次移动是被阻挡的（无论是目标点本身被挡，还是对角线穿角被挡)
 			if (isSquareBlocked)
+				//  将最终的移动向量 resultantMove 设置为零向量。这意味着单位本帧将无法移动，完全被卡住
 				resultantMove = ZeroVector;
 		}
 	}
@@ -3643,57 +3739,97 @@ void CGroundMoveType::UpdatePos(const CUnit* unit, const float3& moveDir, float3
 	//
 	// TODO: look to move as much of this to MT to improve perf.
 
-		bool updatePos = false;
-		const float speed = moveDir.Length2D();
+	// 注意：
+	// 不检查结构物阻塞，碰撞检测会处理这一点
+	// 进入不可通行地形的情况也由碰撞检测处理
+	// 下面的循环尝试避开会阻碍我们启动移动的 "角落" 方格，
+	// 这在我们当前没有移动但想要开始向第一个路径点移动时是必要的
+	// （此时 HSOC 碰撞检测不会起作用）
+	// 当 pathID != 0 时允许通过被阻塞的方格，这依赖于一个假设：
+	// 如果起始方格被阻塞，寻路系统 (PFS) 将不会进行搜索，这一假设过于脆弱
+	// 待办：考虑将此部分尽可能移至多线程 (MT) 以提升性能
+		
 
+		// 初始化一个标志变量 updatePos。如果后续的探测找到了一个可行的移动方案，这个标志就会被设为 true。
+		bool updatePos = false;
+		// 计算出单位在本帧的理想移动速率（标量）。这个值后面会用来限制“滑动”的距离，防止单位因为侧滑而移动得比它本来的速度还快。
+		const float speed = moveDir.Length2D();
+		//  const float3& newPos: 单位最初的理想目标点。
+		//  float3 posOffset: 探测偏移量。这是最重要的参数，代表了“往左/右平移多少”的向量
+		//  float maxDisplacement = 0.f: 最大允许位移，用于限制最终移动距离
 		auto tryToMove =
 				[this, &isSquareOpen, &prevPos, &newPosStartSquare, &resultantMove]
 				(const float3& newPos, float3 posOffset, float maxDisplacement = 0.f)
 			{
 			// units are moved in relation to their previous position.
+			// 计算探测点的位移向量。它不是简单地使用 posOffset，
+			// 而是计算从单位当前的位置 prevPos 到**“理想目标点 newPos + 探测偏移量 posOffset”** 的总位移。
 			float3 offsetFromPrev = (newPos + posOffset) - prevPos;
+			// 如果设置了最大位移限制，并且计算出的探测位移超过了这个限制。
 			if ((maxDisplacement > 0.f) && offsetFromPrev.SqLength2D() > (maxDisplacement*maxDisplacement)) {
+				// 就将这个位移向量的长度缩减到最大允许值。这确保了单位的“滑动”速度不会超过它本来的前进速度。
 				offsetFromPrev.SafeNormalize2D() *= maxDisplacement;
 			}
+			// 计算出最终要进行安全检查的探测点世界坐标。
 			float3 posToTest = prevPos + offsetFromPrev;
+			// 计算探测点所在的地图方格ID。
 			int curSquare = int(posToTest.z / SQUARE_SIZE)*mapDims.mapx + int(posToTest.x / SQUARE_SIZE);
+			// 这是一个优化。如果探测点仍然在最初被判定为阻塞的那个目标方格内，那就没必要再检查了，
+			// 肯定还是阻塞的。只有当探测点已经移动到了一个新的方格时，才需要进行检查。
 			if (curSquare != newPosStartSquare) {
+				// 调用 isSquareOpen 函数，对这个新的探测点进行完整的安全检查（地形+静态物体）。
 				bool updatePos = isSquareOpen(posToTest);
 				if (updatePos) {
+					// 如果检查通过，说明找到了一个安全的“逃逸点”！
+					// 将计算出的、安全的滑动位移向量 offsetFromPrev 赋值给函数的最终输出变量 resultantMove。
 					resultantMove = offsetFromPrev;
 					return true;
 				}
 			}
 			return false;
 		};
-
+		// 探测循环
 		for (int n = 1; n <= SQUARE_SIZE; n++) {
+			// unit->rightdir * n: 计算出一个向单位右侧平移 n 个单位的偏移向量
 			updatePos = tryToMove(newPos, unit->rightdir * n);
 			if (updatePos) { break; }
+			// 计算出一个向单位左侧平移 n 个单位的偏移向量。
 			updatePos = tryToMove(newPos, unit->rightdir * -n);
 			if (updatePos) { break; }
 		}
-
+		// if (!updatePos): 检查“贴墙滑动”探测是否失败。updatePos 只有在 tryToMove 成功找到一个开放方格时才会被设为 true
 		if (!updatePos)
 			resultantMove = ZeroVector;
-		else {
+		else { // 如果探测成功 (updatePos 为 true)，则进入这个代码块，对找到的“滑动”方案 resultantMove 进行最后的精加工。
+			// 计算出应用这个“滑动”位移后，单位将到达的新位置
 			const float3 openPos = prevPos + resultantMove;
+			// 获取这个新位置所在的地图方格坐标
 			const int2 openSquare = toMapSquare(openPos);
+			// 计算出从原始方格到这个新方格的坐标差
 			const int2 fullDiffSquare = openSquare - prevSquare;
+			// 再次进行对角线移动检查。这是一个非常重要的二次验证。
 			if (fullDiffSquare.x != 0 && fullDiffSquare.y != 0) {
 				// axis-aligned slide to avoid clipping around corners and potentially into traps.
+				// 轴对齐滑动 (Axis-Aligned Slide) 逻辑
+				// 获取单位当前的朝向，表示为0-3的整数，代表东南西北等方向。
 				const unsigned int facing = GetFacingFromHeading(unit->heading);
+				// 定义了两个基础的坐标轴向量：Z轴 (0,0,1) 和 X轴 (1,0,0)。
 				constexpr float3 vecs[2] =
 					{ { 0.f, 0.f, 1.f}
 					, { 1.f, 0.f, 0.f}
 				};
+				// 根据单位的朝向，选择一个与之最垂直的坐标轴作为“滑动轴”。
 				const float3 aaSlideAxis = vecs[(facing - 1) % 2];
-
+				// 提取出 resultantMove 在滑动轴上的分量大小。
 				const float displacement = (facing % 2 == 0) ? resultantMove.x : resultantMove.z;
+				// 计算出滑动的方向（+1 或 -1）
 				const float side = 1.f - (2.f * (displacement < 0.f));
+				// 计算最终的、轴对齐的滑动向量
+				// std::min(displacement*side, speed): 确保滑动的距离不会超过单位本来的移动速度 speed。
 				const float3 offset = aaSlideAxis * std::min(displacement*side, speed) * side;
+				// 计算出应用这个纯粹的轴对齐滑动后，单位将到达的最终位置。
 				const float3 posToTest = prevPos + offset;
-
+				// 对这个最终的、经过轴对齐修正的位置进行最后一次安全检查。
 				updatePos = isSquareOpen(posToTest);
 
 			// 	{bool printMoveInfo = (selectedUnitsHandler.selectedUnits.size() == 1)
@@ -3713,14 +3849,17 @@ void CGroundMoveType::UpdatePos(const CUnit* unit, const float3& moveDir, float3
 			// 				, posToTest.x, posToTest.y, posToTest.z
 			// 				, int(updatePos));
 			// 	}}
-
+				// 如果这个轴对齐的滑动是安全的。 就将这个安全的、纯粹的滑动向量 offset 作为最终的移动结果。
 				if (updatePos) {
 					resultantMove = offset;
-				} else {
+				} else { // 如果连轴对齐的滑动都不安全。 说明单位被彻底堵死了，最终移动向量为零。
+
 					resultantMove = ZeroVector;
 				}
-			} else if (resultantMove.SqLength2D() > speed*speed) {
+			} else if (resultantMove.SqLength2D() > speed*speed) { // 触发时机: 如果“滑动”探测成功了，并且这个滑动不是对角线移动 检查这个侧向滑动的距离是否超过了单位本来的前进速度。
+				// 再次调用 tryToMove，但这次传入了 speed 作为 maxDisplacement 参数。这会强制将滑动的距离限制在 speed 之内。
 				updatePos = tryToMove(prevPos, resultantMove, speed);
+				// 如果连限制了距离的滑动都不安全，那就彻底放弃移动。
 				if (!updatePos)
 					resultantMove = ZeroVector;
 			}
@@ -3728,51 +3867,75 @@ void CGroundMoveType::UpdatePos(const CUnit* unit, const float3& moveDir, float3
 	}
 }
 
-
+// UpdateOwnerPos 的核心任务就是：接收这个“理想的”新速度向量，
+// 然后通过一个关键的 UpdatePos 函数进行碰撞规避和地形检查，最后计算出单位在本帧实际可以移动的位移量，并将其应用。
 void CGroundMoveType::UpdateOwnerPos(const float3& oldSpeedVector, const float3& newSpeedVector) {
 	RECOIL_DETAILED_TRACY_ZONE;
-	/*const float*/ oldSpeed = oldSpeedVector.dot(flatFrontDir);
+	// // oldSpeedVector 在 flatFrontDir 投影长度
+	/*const float*/ oldSpeed = oldSpeedVector.dot(flatFrontDir); 
 	/*const float*/ newSpeed = newSpeedVector.dot(flatFrontDir);
-
+	// 作用: 将理想的新速度向量 newSpeedVector 赋给一个名为 moveRequest 的常量。
+	// 这个名字更直观地表达了它的意图：这是单位“请求”在本帧内移动的位移向量。
 	const float3 moveRequest = newSpeedVector;
 
 	// if being built, the nanoframe might not be exactly on
 	// the ground and would jitter from gravity acting on it
 	// --> nanoframes can not move anyway, just return early
 	// (units that become reverse-built will continue moving)
+	// 作用: 守护条件。如果单位正在建造中，它不能移动。直接返回以跳过所有移动逻辑。
+	// 注释解释了原因：建造中的纳米框架可能不完全贴合地面，如果施加重力会导致其抖动
 	if (owner->beingBuilt)
 		return;
-
+	// 这是一个优化。只有当计算出的新速度向量与旧的速度向量不同时，才需要更新单位的速度状态。
 	if (!oldSpeedVector.same(newSpeedVector)) {
+		// 作用: 调用单位的成员函数，将 owner->speed（三维速度向量）和 owner->speed.w（速率标量）更新为新的值。
 		owner->SetVelocityAndSpeed(newSpeedVector);
 	}
 
-	if (!moveRequest.same(ZeroVector)) {
-		float3 resultantVel;
+	if (!moveRequest.same(ZeroVector)) { // 只有在单位有移动请求时（即速度不为零），才执行后续复杂的碰撞和位置更新逻辑。
+		// 声明一个三维向量，用于接收 UpdatePos 的计算结果。
+		float3 resultantVel; 
 		bool limitDisplacment = true;
 		float maxDisplacementSq = -1.f;
-
+		// 这是整个函数中最关键的调用
+		// 作用: UpdatePos 函数接收单位“想要”移动的位移向量 moveRequest，然后在内部进行精细的地形和静态障碍物碰撞检测。
+		// 它会检查这个移动是否会导致单位穿墙或进入不可通行的地形。
+		// 输出: 它会返回一个经过修正的、实际可行的位移向量 resultantVel。
+		// 	如果 moveRequest 是安全的，resultantVel 会等于 moveRequest
+		//  如果 moveRequest 会导致碰撞，resultantVel 会被修改（例如，变成沿着墙壁滑动的向量），甚至可能变成零向量（如果完全被堵住）。
 		UpdatePos(owner, moveRequest, resultantVel, ThreadPool::GetThreadNum());
-
+		// bool isMoveColliding = ...: 检查 UpdatePos 返回的实际位移 resultantVel 是否与我们请求的位移 moveRequest 不同。
+		// 如果不同，就意味着发生了碰撞或被地形阻挡。
 		bool isMoveColliding = !resultantVel.same(moveRequest);
+		// 如果检测到碰撞，就调用 ReRequestPath(false) 来请求一次新的寻路。
+		// 这是一种重要的自适应行为。当前的移动被阻挡，很可能意味着原有的路径已经失效（例如，路上突然出现了一个残骸）。
+		// 通过请求新路径，单位可以尝试找到绕过这个新障碍的方法。
 		if (isMoveColliding) {
 			// Sometimes now regular collisions won't happen due to this code preventing that.
 			// so units need to be able to get themselves out of stuck situations. So adding
 			// a rerequest path check here.
+			// 由于此代码的阻止，常规碰撞有时不会发生
+			// 因此，单位需要能够能够自行摆脱被困状态。所以在此处添加了一个重新请求路径的检查。
 			ReRequestPath(false);
 		}
-
+		// 检查 UpdatePos 返回的实际位移是否为零向量。如果不为零，说明至少还有一个可移动的方向。
 		bool isThereAnOpenSquare = !resultantVel.same(ZeroVector);
+
 		if (isThereAnOpenSquare){
+			// resultantForces = resultantVel;: 如果有路可走，就将这个安全的位移向量 resultantVel 赋值给 resultantForces。
+			// 这个 resultantForces 变量会在稍后的 UpdatePreCollisions 中被用来实际移动单位。
 			resultantForces = resultantVel;
 			// owner->Move(resultantVel, true);
+			// : 如果单位之前被标记为“卡住”（positionStuck），但现在又能移动了，就清除这个标志。
 			if (positionStuck) {
 				positionStuck = false;
 			}
-		} else if (positionStuck) {
+		} else if (positionStuck) { // 触发时机: UpdatePos 返回了零向量（完全没路可走），并且单位之前已经被标记为“卡住”。
 			// Unit is stuck an the an open square could not be found. Just allow the unit to move
 			// so that it gets unstuck eventually. Hopefully this won't look silly in practice, but
 			// it is better than a unit being permanently stuck on something.
+			// 这是一个强制解卡逻辑。注释解释说：既然单位已经被卡住，并且找不到任何开放的方格，那么就强行允许它按照原始的 moveRequest 移动。
+			// 这可能会导致它暂时穿过障碍物的边缘，但这被认为是比让单位永久卡死更好的选择
 			resultantForces = moveRequest;
 			// owner->Move(moveRequest, true);
 		}
