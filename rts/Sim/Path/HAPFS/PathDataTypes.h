@@ -144,14 +144,22 @@ struct PathNodeStateBuffer {
 	unsigned int GetSize() const { return fCost.size(); }
 
 	// 根据缓冲区分辨率和地图分辨率调整内部各向量的大小
+	/// @param bufRes 寻路器工作网格的分辨率。例如，对于一个在1024x1024地图上工作的BLOCK_SIZE=16的路径估算器，bufRes 就是 (64, 64)。
+	/// @param mapRes  (Map Resolution): 游戏地图的完整精细分辨率，例如 (1024, 1024)。
+	/// @note 这个函数会清空所有内部向量，并重新分
 	void Resize(const int2& bufRes, const int2& mapRes) {
+		// 计算出每个缓冲区格子对应多少个地图格子。在上面的例子中，ps 会是 (1024/64, 1024/64) = (16, 16)，这正好等于 BLOCK_SIZE
 		ps = mapRes / bufRes;
+		// br (Buffer Resolution): 直接缓存传入的缓冲区分辨率
 		br = bufRes;
+		// (Map Resolution): 直接缓存传入的地图分辨率
 		mr = mapRes;
 
 		fCost.resize(br.x * br.y, PATHCOST_INFINITY);
 		gCost.resize(br.x * br.y, PATHCOST_INFINITY);
+		// 量的大小，并将每个节点的初始掩码设置为0。这个掩码用于存储节点的状态（如开放、关闭、阻塞等），0代表默认的“未访问”状态。
 		nodeMask.resize(br.x * br.y, 0);
+		// 调整 nodeLinksObsoleteFlags 向量的大小，并将初始值设为0。这个标志用于标记节点之间的连接是否因地形变化而失效
 		nodeLinksObsoleteFlags.resize(br.x * br.y, 0);
 
 		// 按需创建

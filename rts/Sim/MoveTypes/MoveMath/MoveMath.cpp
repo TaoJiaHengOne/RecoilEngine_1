@@ -103,22 +103,32 @@ float CMoveMath::GetPosSpeedMod(const MoveDef& moveDef, unsigned xSquare, unsign
 
 	return 0.0f;
 }
-
+/**
+ * 这个函数的核心目标是计算一个单位在地图上某个特定方格 (xSquare, zSquare) 上的地形速度修正系数。
+ * 与另一个不带 moveDir 参数的版本不同，这个版本的高级之处在于，它不仅考虑了地形的陡峭程度，
+ * 还精确地考虑了单位相对于斜坡的移动方向——即单位是在上坡、下坡还是横向坡移动，
+ * 并以此对速度做出更精细的调整。这对于“方向性寻路”（Directional Pathing）功能至关重要。
+ * 是函数的定义，接收单位的移动定义(moveDef)、要检查的方格坐标(xSquare, zSquare)，以及最重要的——单位的移动方向向量(moveDir)
+*/
 float CMoveMath::GetPosSpeedMod(const MoveDef& moveDef, unsigned xSquare, unsigned zSquare, float3 moveDir)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 这是一个边界检查。如果查询的坐标超出了地图范围，直接返回0.0，表示该位置不可通行。
 	if (xSquare >= mapDims.mapx || zSquare >= mapDims.mapy)
 		return 0.0f;
-
+	// 它计算了两种一维索引：accurateSquare 用于访问全分辨率的地图数据（如高度图），
+	// square 用于访问半分辨率的数据（如地形类型图、坡度图），这是一种常见的内存优化。
 	const int accurateSquare = xSquare + (zSquare * mapDims.mapx);
 	const int square = (xSquare >> 1) + ((zSquare >> 1) * mapDims.hmapx);
+	// 根据获取的地形类型的索引
 	const int squareTerrType = readMap->GetTypeMapSynced()[square];
-
+	// 高度和梯度
 	const float height = readMap->GetMaxHeightMapSynced()[accurateSquare];
 	const float slope  = readMap->GetSlopeMapSynced()[square];
-
+	// 地形详情
 	const CMapInfo::TerrainType& tt = mapInfo->terrainTypes[squareTerrType];
-
+	// 是此函数的关键步骤之一。它获取了该方格的表面法线向量 (sqrNormal)。法线向量是一个垂直于地面的三维向量，
+	// 它精确地描述了斜坡的朝向。例如，一个平地的法线是 (0, 1, 0)，而一个朝向正南方的斜坡，其法线会有一个指向 +z 方向的分量
 	const float3 sqrNormal = readMap->GetCenterNormals2DSynced()[xSquare + zSquare * mapDims.mapx];
 
 	// with a flat normal, only consider the normalized xz-direction
@@ -128,8 +138,16 @@ float CMoveMath::GetPosSpeedMod(const MoveDef& moveDef, unsigned xSquare, unsign
 
 	// note: moveDir is (or should be) a unit vector in the xz-plane, y=0
 	// scale is negative for "downhill" slopes, positive for "uphill" ones
+	// 这是整个函数的核心计算，用于判断上坡还是下坡
+	// 如果单位上坡，moveDir 与法线的方向夹角小于90度，点积为正值
+	// 如果单位下坡，moveDir 与法线的方向夹角大于90度，点积为负值
+	// 如果单位横向坡移动，两者垂直，点积为0
+	// 前面的负号将结果反转。因此，dirSlopeMod 的值变为
+	// 上坡时为正值 (代表一个速度惩罚)
+	// 下坡时为负值 (代表一个速度加成)
 	const float dirSlopeMod = -moveDir.dot(sqrNormal);
-
+	// 将前面收集的所有信息——height, slope，以及最关键的 dirSlopeMod——传递给这个辅助函数，计算出综合的地形影响。
+	// 最后再乘以该地形对该兵种的基础速度系数 tt.tankSpeed，得出最终的速度修正系数
 	switch (moveDef.speedModClass) {
 		case MoveDef::Tank:  { return (GroundSpeedMod(moveDef, height, slope, dirSlopeMod) * tt.tankSpeed ); } break;
 		case MoveDef::KBot:  { return (GroundSpeedMod(moveDef, height, slope, dirSlopeMod) * tt.kbotSpeed ); } break;

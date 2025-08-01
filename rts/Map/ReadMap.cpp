@@ -519,8 +519,11 @@ void CReadMap::UpdateDraw(bool firstCall)
 void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 首先，它检查传入的矩形是否覆盖了整张地图。如果是，就将 initialize 标记设为 true，
+	// 表示这是一次全局初始化，而非局部更新。
 	const bool initialize = (hgtMapRect == SRectangle{ 0, 0, mapDims.mapx, mapDims.mapy });
-
+	// 接着，它将传入的矩形范围在每个方向上都扩大一格。
+	// 这是因为计算一个方格的法线和坡度时，需要用到其相邻方格的顶点高度。扩大一圈可以确保所有计算都有足够的边界数据。
 	const int2 mins = {hgtMapRect.x1 - 1, hgtMapRect.z1 - 1};
 	const int2 maxs = {hgtMapRect.x2 + 1, hgtMapRect.z2 + 1};
 
@@ -529,15 +532,61 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
 	//   parts of UpdateHeightMapUnsynced() (vertex normals, normal texture) however inclusively clamp to
 	//   map{x,y} since they index corner heightmaps, while UnsyncedHeightMapUpdate() EventClients should
 	//   already expect {x,z}2 <= map{x,y} and do internal clamping as well
+	// 注意:
+	// 矩形会被钳位（限制）到 map {x,y} m1，这是中心高度图的正确包含性边界
+	// 但 UpdateHeightMapUnsynced () 函数的部分逻辑（顶点法线、法线纹理）会包含性地钳位到
+	// map {x,y}，因为它们需要索引角落高度图；而 UnsyncedHeightMapUpdate () 事件的客户端
+	// 应当已经预期 {x,z} 2 ≤ map {x,y}，并在内部自行处理钳位逻辑
+	// mapxm1 = mapx - 1 
+	
+	/**
+	 * 对下面注释的代码进行解释:
+	 * 想象一个 2x2 的地图
+	 * 这个地图由4个方格组成，但它有 3x3 = 9个顶点。
+	 * (0,0)---(1,0)---(2,0)  <-- 顶点行 (z=0)
+	 *   |       |       |
+	 *   | S(0,0)| S(1,0)|      S = 方格 (Square)
+	 *   |       |       |
+	 * (0,1)---(1,1)---(2,1)  <-- 顶点行 (z=1)
+	 *   |       |       |
+	 *   | S(0,1)| S(1,1)|
+	 *   |       |       |
+	 * (0,2)---(1,2)---(2,2)  <-- 顶点行 (z=2)
+	 * 
+	 * ^       ^       ^
+	 * |       |       |
+ 	 * 顶点列  顶点列  顶点列
+	 * (x=0)   (x=1)   (x=2)
+	 * 在这个例子中：
+	 *
+	 * 	mapDims.mapx = 2 (地图宽度为2个方格)
+	 *	mapDims.mapy = 2 (地图高度为2个方格)
+	 *	现在我们来分析这两个矩形的定义：
+	 *  1. enterRect (中心区域)
+	 *  于一个 2x2 的方格地图，方格的X坐标索引是 0 和 1，Y坐标索引也是 0 和 1。
+	 *	最大索引: 方格的最大有效索引是 (1, 1)，也就是 (mapx - 1, mapy - 1)。在代码中，mapxm1 就是 mapx - 1 的简写
+	 *  2. cornerRect (角点区域)
+	 *  对于一个 2x2 的方格地图，它有 3x3 的顶点。顶点的X坐标索引是 0, 1, 2，Y坐标索引也是 0, 1, 2
+	 */
+
+	
+	// 用于更新那些以方格中心为索引的数据（如 centerHeightMap, slopeMap）。它的上界被限制在 mapx-1。
 	const SRectangle centerRect = {std::max(mins.x, 0), std::max(mins.y, 0),  std::min(maxs.x, mapDims.mapxm1),  std::min(maxs.y, mapDims.mapym1)};
+	//  用于更新那些以方格角点为索引的数据（如 cornerHeightMap）。它的上界被限制在 mapx
 	const SRectangle cornerRect = {std::max(mins.x, 0), std::max(mins.y, 0),  std::min(maxs.x, mapDims.mapx  ),  std::min(maxs.y, mapDims.mapy  )};
 
+
+	// 根据角点高度计算中心高度和最大高度
 	UpdateCenterHeightmap(centerRect, initialize);
+	//  生成用于渲染的低分辨率高度图
 	UpdateMipHeightmaps(centerRect, initialize);
+	// 根据角点高度计算表面法线
 	UpdateFaceNormals(centerRect, initialize);
+	// 必须在法线计算之后，根据法线计算坡度，供寻路系统使用
 	UpdateSlopemap(centerRect, initialize); // must happen after UpdateFaceNormals()!
 
 	// push the unsynced update; initial one without LOS check
+	// 通知非同步的渲染端进行更新 下面是渲染相关
 	if (initialize) {
 		unsyncedHeightMapUpdates.push_back(cornerRect);
 	} else {
@@ -674,6 +723,10 @@ void CReadMap::UpdateFaceNormals(const SRectangle& rect, bool initialize)
 	RECOIL_DETAILED_TRACY_ZONE;
 	const float* heightmapSynced = GetCornerHeightMapSynced();
 
+	// 这一步是在扩大并约束计算范围。
+	// rect.z1 - 1, rect.x2 + 1 等: 将需要更新的矩形区域 rect 向外扩大一圈。因为计算一个方格的法线需要其相邻顶点的信息，
+	// 扩大范围可以确保边界上的方格也能被正确计算。
+	// std::max(0, ...) 和 std::min(mapDims.mapxm1, ...): 将扩大后的范围限制在地图的有效坐标内，防止数组越界访问
 	const int z1 = std::max(             0, rect.z1 - 1);
 	const int x1 = std::max(             0, rect.x1 - 1);
 	const int z2 = std::min(mapDims.mapym1, rect.z2 + 1);
@@ -684,9 +737,9 @@ void CReadMap::UpdateFaceNormals(const SRectangle& rect, bool initialize)
 		float3 fnBR;
 
 		for (int x = x1; x <= x2; x++) {
+			// 这部分代码负责获取当前方格 (x, y) 的四个角点的高度值
 			const int idxTL = (y    ) * mapDims.mapxp1 + x; // TL
 			const int idxBL = (y + 1) * mapDims.mapxp1 + x; // BL
-
 			const float& hTL = heightmapSynced[idxTL    ];
 			const float& hTR = heightmapSynced[idxTL + 1];
 			const float& hBL = heightmapSynced[idxBL    ];

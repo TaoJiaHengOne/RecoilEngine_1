@@ -122,16 +122,25 @@ static constexpr int2 PF_DIRECTION_VECTORS_2D[] = {
 
 
 // PF and PE flags (used in nodeMask[])
+// 表示从左边的节点移动到了当前节点
 static constexpr unsigned int PATHOPT_LEFT      =   1; // +x
+// 表示从右边的节点移动到了当前节点
 static constexpr unsigned int PATHOPT_RIGHT     =   2; // -x
+// 表示从上方的节点移动到了当前节点
 static constexpr unsigned int PATHOPT_UP        =   4; // +z
+// 表示从下方的节点移动到了当前节点
 static constexpr unsigned int PATHOPT_DOWN      =   8; // -z
+// 表示该节点位于“开放列表”（Open Set）中。这意味着它已经被发现，但它的邻居节点尚未被完全探索
 static constexpr unsigned int PATHOPT_OPEN      =  16;
+// 示该节点位于“关闭列表”（Closed Set）中。这意味着它已经被探索过，算法不会再次访问它
 static constexpr unsigned int PATHOPT_CLOSED    =  32;
+// 表示该节点不可通行。寻路算法会完全忽略被标记为阻塞的节点
 static constexpr unsigned int PATHOPT_BLOCKED   =  64;
+// 表示该节点的数据已过时。这通常是因为地图发生了变化（例如地形被炸毁）。带有此标志的节点在被访问时，其相关的预计算数据需要被重新计算
 static constexpr unsigned int PATHOPT_OBSOLETE  = 128;
+// 个值 (二进制的 11111111) 并不是一个状态标志，而是定义了这套8位掩码所能表示的最大值，可用于验证或检查
 static constexpr unsigned int PATHOPT_SIZE      = 255; // size of PATHOPT bitmask
-
+// 它的主要用途是作为一个掩码，用于从一个节点的 nodeMask 状态值中提取出方向信息
 static constexpr unsigned int PATHOPT_CARDINALS = (PATHOPT_RIGHT | PATHOPT_LEFT | PATHOPT_UP | PATHOPT_DOWN);
 
 static constexpr unsigned int DIR2OPT[] = {

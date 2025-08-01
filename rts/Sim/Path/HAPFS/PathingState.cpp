@@ -68,13 +68,20 @@ PathingState::PathingState()
 void PathingState::Init(std::vector<IPathFinder*> pathFinderlist, PathingState* parentState, unsigned int _BLOCK_SIZE, const std::string& peFileName, const std::string& mapFileName)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 将函数传入的分辨率参数 _BLOCK_SIZE 赋值给当前 PathingState 实例的成员变量 BLOCK_SIZE。
+	// 这是最关键的一步，它决定了这个 PathingState 是为低分辨率（例如32x32）还是中分辨率（例如16x16）的路径估算器服务的
 	BLOCK_SIZE = _BLOCK_SIZE;
+	// 预先计算并存储一个“宏观块”在世界坐标中的边长（以像素或游戏单位“elmos”计）。
+	// SQUARE_SIZE 是一个常量，代表一个最精细地图方格的边长。这样做可以避免在后续计算中重复进行乘法，提升效率
 	BLOCK_PIXEL_SIZE = BLOCK_SIZE * SQUARE_SIZE;
 
 	{
 		// 56 x 16 elms for QuickSilver
+		// 用地图的总宽度（以精细方格为单位）除以一个宏观块的边长，计算出当前网格在X轴方向上有多少个块
 		mapDimensionsInBlocks.x = mapDims.mapx / BLOCK_SIZE;
+		// 同上，计算Y轴方向上的块数。
 		mapDimensionsInBlocks.y = mapDims.mapy / BLOCK_SIZE;
+		// 计算并存储当前网格的总块数，这个值将用于后续分配各种数据数组的大小。
         mapBlockCount = mapDimensionsInBlocks.x * mapDimensionsInBlocks.y;
 
 		// LOG("TK PathingState::Init X(%d) = mapx(%d) / blks(%d), Y(%d) = mapy(%d) / blks(%d)"
@@ -85,10 +92,11 @@ void PathingState::Init(std::vector<IPathFinder*> pathFinderlist, PathingState* 
 		// 	, mapDims.mapy
 		// 	, BLOCK_SIZE
 		// 	);
-
+		// 这两行代码重复了上面的计算，并将结果存储在另一个成员变量 nbrOfBlocks 中。
+		// 这可能是为了兼容从 IPathFinder 基类继承来的接口，因为基类也使用了名为 nbrOfBlocks 的变量。
 		nbrOfBlocks.x = mapDims.mapx / BLOCK_SIZE;
 		nbrOfBlocks.y = mapDims.mapy / BLOCK_SIZE;
-
+		// pathingStates: 这是一个静态（static）变量，意味着它被所有 PathingState 实例共享。
 		instanceIndex = pathingStates++;
 	}
 
@@ -96,38 +104,66 @@ void PathingState::Init(std::vector<IPathFinder*> pathFinderlist, PathingState* 
 
 	{
 		RECOIL_DETAILED_TRACY_ZONE;
+		// 将传入的 pathFinderlist (一个包含所有寻路器实例指针的列表) 存储到成员变量 pathFinders 中。
+		// pathFinderlist 存储的是相对应分辨率的寻路器实例 
 		pathFinders = pathFinderlist;
+		// : 这一行将一个以“精细方格”为单位的更新工作量 (SQUARES_TO_UPDATE)，转换为以当前分辨率的“宏观块”为单位的工作量。
+		// 这个值用于控制当地图变化后，每帧增量更新多少路径数据。
 		BLOCKS_TO_UPDATE = (SQUARES_TO_UPDATE) / (BLOCK_SIZE * BLOCK_SIZE) + 1;
-
+		// 可能是一个用于节流更新速率的惩罚计数器
 		blockUpdatePenalty = 0;
+		// 用于控制向加载屏幕或网络日志发送进度更新消息的频率
 		nextOffsetMessageIdx = 0;
 		nextCostMessageIdx = 0;
-
+		// 初始化路径数据的校验和为0
 	 	pathChecksum = 0;
 	 	fileHashCode = CalcHash(__func__);
-
+		// 初始化两个原子计数器。它们被设置为当前分辨率网格的总块数。
+		// 在多线程预计算过程中，各个线程会以原子方式（线程安全地）递减这两个计数器来领取任务（即要处理的块），从而实现高效的任务分配。
 		offsetBlockNum = {mapDimensionsInBlocks.x * mapDimensionsInBlocks.y};
 		costBlockNum = {mapDimensionsInBlocks.x * mapDimensionsInBlocks.y};
 
 		vertexCosts.clear();
+		// vertexCosts 向量分配一块巨大的内存。它的大小由 移动类型总数 * 块总数 * 每个块的出边方向数(8) 决定。
+		// 这个向量将存储所有移动类型在所有宏观块之间移动的预计算成本
+		// 所有成本被初始化为无穷大，表示在计算完成前，所有路径都是“不通”的。
 		vertexCosts.resize(moveDefHandler.GetNumMoveDefs() * blockStates.GetSize() * PATH_DIRECTION_VERTICES, PATHCOST_INFINITY);
+		// 分配并初始化 maxSpeedMods 向量。这个向量为每种移动类型存储一个值，
+		// 代表该移动类型在整个地图上可能遇到的最大地形速度修正系数。这是一个预计算的优化，用于在A*搜索中校正启发式函数（H值）的估
+		// maxSpeedMods 每个元素都是某一个MoveDef在整个地图上移动速度最快的移动系数
 		maxSpeedMods.clear();
 		maxSpeedMods.resize(moveDefHandler.GetNumMoveDefs(), 0.001f);
-
+		// 清空几个用于预计算和增量更新过程中的临时数据容器，确保它们在使用前处于干净状态。
+		// updatedBlocks: 存储因地图变化而需要更新的块队列
+		// consumedBlocks: 存储在一个更新周期中正被处理的块列表
+		// offsetBlocksSortedByCost: 存储用于在宏观块内寻找最佳通行点的偏移量列表
 		updatedBlocks.clear();
 		consumedBlocks.clear();
 		offsetBlocksSortedByCost.clear();
 	}
-
+	// 这部分代码负责建立 PathingState 实例之间的父子链接。
+	// childPE = this: 创建一个名为 childPE 的本地指针，指向当前正在初始化的这个 PathingState 实例 (this)。
+	// parentPE = parentState: 创建一个名为 parentPE 的本地指针，指向通过函数参数传入的父级 PathingState 实例。
+	// if (parentPE != nullptr): 检查是否存在一个父级实例。对于最低分辨率的 PathingState，
+	// 它的父级就是中等分辨率的实例。而中等分辨率的父级可能是 nullptr
+	// parentPE->nextPathState = childPE;: 如果父级存在，就将父级的 nextPathState 指针指向当前这个子级实例。
+	// 这样就形成了一个单向链表，从高分辨率层级指向低分辨率层级。
 	PathingState*  childPE = this;
 	PathingState* parentPE = parentState;
-
 	if (parentPE != nullptr)
 		parentPE->nextPathState = childPE;
 
+
+	// 为 FindBlockPosOffset 函数进行预计算。
 	// precalc for FindBlockPosOffset()
 	{
 		offsetBlocksSortedByCost.reserve(BLOCK_SIZE * BLOCK_SIZE);
+		// 这段双层循环的目的是为一个宏观块内的每一个精细方格计算一个“成本值”
+		// for (..): 循环遍历一个 BLOCK_SIZE x BLOCK_SIZE 区域内的所有坐标 (x, z)
+		// const float dx = ...; const float dz = ...;: 计算当前方格 (x, z) 相对于宏观块中心点的坐标 (dx, dz)。
+		// 例如，在一个16x16的块中，中心点是(7.5, 7.5)，那么左下角(0,0)的相对坐标就是(-7.5, -7.5)。
+		// const float cost = (dx * dx + dz * dz);: 计算该方格到块中心点的距离的平方作为其基础成本。
+		// offsetBlocksSortedByCost.emplace_back(cost, x, z);: 将计算出的成本 cost 和方格的原始偏移坐标 (x, z) 一起存入 offsetBlocksSortedByCost 向量中。
 		for (unsigned int z = 0; z < BLOCK_SIZE; ++z) {
 			for (unsigned int x = 0; x < BLOCK_SIZE; ++x) {
 				const float dx = x - (float)(BLOCK_SIZE - 1) * 0.5f;
@@ -137,12 +173,18 @@ void PathingState::Init(std::vector<IPathFinder*> pathFinderlist, PathingState* 
 				offsetBlocksSortedByCost.emplace_back(cost, x, z);
 			}
 		}
+		// 在所有方格的成本都计算完毕后，这一步对整个 offsetBlocksSortedByCost 向量进行排序。应该按照每个元素 cost 成员的升序来排列
+		// 执行完毕后，offsetBlocksSortedByCost 向量中存储了从块中心点由近及远的所有方格的偏移量。
+		// 当 FindBlockPosOffset 函数需要在一个宏观块内寻找最佳通行点时，它可以直接遍历这个已排序的列表，从最靠近中心的点开始检查，
+		// 一旦找到一个可通行的点并且后续点的距离成本已经超出现有最佳成本，就可以提前终止搜索，从而极大地提高了效率。
 		std::stable_sort(offsetBlocksSortedByCost.begin(), offsetBlocksSortedByCost.end(), [](const SOffsetBlock& a, const SOffsetBlock& b) {
 			return (a.cost < b.cost);
 		});
 	}
-
-	if (BLOCK_SIZE == LOWRES_PE_BLOCKSIZE) {
+	// 这个代码块是一个在游戏加载时执行的、计算量巨大的一次性预处理步骤。
+	// 它的核心目标是为每一种移动类型（MoveDef）找出它在整张地图上可能遇到的最快地形速度修正系数，并对这个结果进行处理，
+	// 以供后续的A*寻路算法进行一项关键的性能和准确性优化。
+	if (BLOCK_SIZE == LOWRES_PE_BLOCKSIZE) { //这整个代码块仅当当前正在初始化的 PathingState 实例是用于最低分辨率的路径估算器时才会执行
 		assert(parentPE != nullptr);
 
 		// calculate map-wide maximum positional speedmod for each MoveDef
@@ -150,15 +192,22 @@ void PathingState::Init(std::vector<IPathFinder*> pathFinderlist, PathingState* 
 			const MoveDef* md = moveDefHandler.GetMoveDefByPathType(i);
 
 			for (int y = 0; y < mapDims.mapy; y++) {
-				for (int x = 0; x < mapDims.mapx; x++) {
+				for (int x = 0; x < mapDims.mapx; x++) { // 迭代地图每一个网格
+					// 对于每一个方格，调用此函数计算出当前移动类型 md 在该方格上的地形速度修正系数（例如，公路上 > 1.0，泥地里 < 1.0）。
+					// childPE = this 
 					childPE->maxSpeedMods[i] = std::max(childPE->maxSpeedMods[i], CMoveMath::GetPosSpeedMod(*md, x, y));
 				}
 			}
 		});
 
 		// calculate reciprocals, avoids divisions in TestBlock
+		// 计算倒数，以避免在 TestBlock 函数（A*搜索的核心循环）中进行昂贵的除法运算
+
 		for (unsigned int i = 0; i < maxSpeedMods.size(); i++) {
-			 childPE->maxSpeedMods[i] = 1.0f / childPE->maxSpeedMods[i];
+			// 将 maxSpeedMods 数组中存储的最大速度修正系数替换为其倒数。
+			// 这样，在后续需要用“距离除以最大速度”的地方，就可以用“距离乘以这个倒数”来代替，因为乘法通常比浮点数除法更快。
+			childPE->maxSpeedMods[i] = 1.0f / childPE->maxSpeedMods[i];
+			//  将计算并处理好的倒数值复制一份给父级 PathingState 实例。这样，中等分辨率的 PathingState 就不需要再重复进行上面那段耗时巨大的全图扫描计算了。
 			parentPE->maxSpeedMods[i] = childPE->maxSpeedMods[i];
 		}
 	}

@@ -100,7 +100,7 @@ protected: // IPathFinder 接口的实现
 
 	// 将路径添加到共享的 PathingState 缓存中，重写基类方法
 	void AddCache(
-		const IPath* path,
+		const IPath::Path* path,
 		const IPath::SearchResult result,
 		const int2 strtBlock,
 		const int2 goalBlock,

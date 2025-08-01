@@ -106,10 +106,16 @@ void IPathFinder::AllocStateBuffer()
 	blockStates = std::move(nodeStateBuffers[instanceIndex]);
 }
 
+/// @brief 的核心作用是高效地清理上一次A*搜索留下的痕迹，为下一次新的搜索做准备。
+/// 它通过只重置被“弄脏”的节点，而不是整个地图的状态，来实现极高的执行效率。
 void IPathFinder::ResetSearch()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 循环持续进行，直到 dirtyBlocks 向量变为空。dirtyBlocks 是一个特殊的列表，
+	// 它在上一次搜索过程中，记录了所有被访问过（被设为“开放”或“关闭”状态）的节点的索引。
 	while (!dirtyBlocks.empty()) {
+		// 从 dirtyBlocks 列表的末尾取出一个“脏”节点的索引，并调用 ClearSquare 函数。这个函数会重置该节点在 blockStates 缓冲区中的状态，
+		// 例如将其F值和G值设回无穷大，并清除其状态掩码，使其恢复到“未访问”状态。
 		blockStates.ClearSquare(dirtyBlocks.back());
 		dirtyBlocks.pop_back();
 	}
