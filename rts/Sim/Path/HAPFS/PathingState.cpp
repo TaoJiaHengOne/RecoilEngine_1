@@ -268,8 +268,11 @@ void PathingState::InitEstimator(const std::string& peFileName, const std::strin
 	//LOG("TK PathingState::InitEstimator: %d threads available", numThreads);
 
 	// Not much point in multithreading these...
+	// 调用辅助函数，其主要作用是为 blockStates.peNodeOffsets 这个巨大的向量分配内存，
+	// 确保它有足够的空间来存储每一种移动类型在每一个宏观块中的“最佳通行点”数据。
 	InitBlocks();
-
+	// 这是函数的核心分支。它尝试调用 ReadFile 从磁盘加载预计算数据。
+	// 如果 ReadFile 返回 false（即缓存文件不存在、已损坏或与当前版本不匹配），则执行 if 块内的代码来从头生成数据。
 	if (!ReadFile(peFileName, mapFileName)) {
 		char calcMsg[512];
 		const char* fmtStrs[4] = {
@@ -285,21 +288,26 @@ void PathingState::InitEstimator(const std::string& peFileName, const std::strin
 		}
 
 		// Mark block directions as dirty to ensure they get updated.
+		// 注释说明了其意图：将所有块的连接方向标记为“脏”的，以确保它们都会被更新
 		auto& nodeFlags = blockStates.nodeLinksObsoleteFlags;
+		// 遍历 nodeLinksObsoleteFlags 数组，并将每个元素都设置为 PATH_DIRECTIONS_HALF_MASK。
+		// 这相当于一个全局标记，告诉后续的计算函数：“所有宏观块之间的通行成本都需要被重新计算”
 		std::for_each(nodeFlags.begin(), nodeFlags.end(), [](std::uint8_t& f){ f = PATH_DIRECTIONS_HALF_MASK; });
 
 		// note: only really needed if numExtraThreads > 0
+		// 创建一个线程屏障 (barrier)。它是一个同步工具，能确保所有线程都执行到屏障点后，才能一起继续执行后续代码
 		spring::barrier pathBarrier(numThreads);
-
+		// 这个函数内部包含两个计算阶段，中间由 pathBarrier 隔开。所有线程必须先全部完成第一阶段（计算块内偏移量），
+		// 才能开始第二阶段（计算块间通行成本），因为第二阶段依赖第一阶段的结果
 		for_mt(0, numThreads, [this, &pathBarrier](int i) {
 			CalcOffsetsAndPathCosts(ThreadPool::GetThreadNum(), &pathBarrier);
 		});
 
 		std::for_each(nodeFlags.begin(), nodeFlags.end(), [](std::uint8_t& f){ f = 0; });
-
+		// 在所有计算都完成后，再次遍历 nodeLinksObsoleteFlags 数组，并将所有标志位清零。这表示所有数据都已是最新，不再“脏”了
 		sprintf(calcMsg, fmtStrs[2], __func__, BLOCK_SIZE, peFileName.c_str(), fileHashCode);
 		loadscreen->SetLoadMessage(calcMsg, true);
-
+		//  更新加载屏幕，告知用户正在将计算结果写入缓存文件，然后调用 WriteFile 函数执行实际的写入操作
 		WriteFile(peFileName, mapFileName);
 
 		sprintf(calcMsg, fmtStrs[3], __func__, BLOCK_SIZE, peFileName.c_str(), fileHashCode);
@@ -307,8 +315,11 @@ void PathingState::InitEstimator(const std::string& peFileName, const std::strin
 	}
 
 	// calculate checksum over block-offsets and vertex-costs
+	// 无论数据是从文件加载的还是刚刚生成的，都会调用 CalcChecksum 函数，对内存中最终的预计算数据计算一次校验和。
+	// 这个校验和将在多人游戏中用于同步检查，确保所有玩家的寻路数据完全一致
 	pathChecksum = CalcChecksum();
-
+	// 最后，为 PathingState 实例创建两个路径缓存对象 (CPathCache)。一个用于同步环境([1])，一个用于非同步环境([0])。
+	// 这些缓存用于存储运行时的寻路结果，与预计算数据是不同的
 	pathCache[0] = pcMemPool.alloc<CPathCache>(mapDimensionsInBlocks.x, mapDimensionsInBlocks.y);
 	pathCache[1] = pcMemPool.alloc<CPathCache>(mapDimensionsInBlocks.x, mapDimensionsInBlocks.y);
 }
