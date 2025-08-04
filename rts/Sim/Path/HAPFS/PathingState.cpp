@@ -335,8 +335,10 @@ void PathingState::InitBlocks()
 	}
 }
 
-
+// 这是一个宏，用于确保函数在调用时栈内存对齐，这对于使用SIMD指令集（如xsimd）进行优化的代码来说，可以提升性能
 __FORCE_ALIGN_STACK__
+// threadNum 传入当前执行这段代码的线程ID。
+// pathBarrier 传入一个线程屏障 (barrier) 对象的指针，这是实现多线程同步的关键
 void PathingState::CalcOffsetsAndPathCosts(unsigned int threadNum, spring::barrier* pathBarrier)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -347,31 +349,51 @@ void PathingState::CalcOffsetsAndPathCosts(unsigned int threadNum, spring::barri
 	// A must be completely finished before B_i can be safely called. This means we cannot
 	// let thread i execute (A_i, B_i), but instead have to split the work such that every
 	// thread finishes its part of A before any starts B_i.
+	// 这段注释是理解此函数的关键。开发者明确指出：
+	// 任务B (EstimatePathCosts) 依赖于任务A (CalculateBlockOffsets)。
+	// 必须在所有块的任务A都完成后，才能开始任何块的任务B。因此，不能让一个线程对自己负责的块连续执行A和B，
+	// 而必须将工作拆分成两个阶段。
+
+	// 获取当前分辨率下总块数的最大索引
 	const unsigned int maxBlockIdx = blockStates.GetSize() - 1;
 	int i;
-
+	// 这是一个线程安全的工作队列。 offsetBlockNum 是一个原子计数器，初始值为总块数。	
+	// i = --offsetBlockNum:  每个线程进入循环时，都会对这个计数器执行一次原子性的“减1并取值”操作。
+	// 这确保了每个线程都能领到一个独一无二的任务编号 i，就像在排队机上取号一样，绝不会重复。
 	while ((i = --offsetBlockNum) >= 0)
+		// 个线程根据自己领到的任务号，计算出对应的块索引，然后调用 CalculateBlockOffsets 函数。
+		// 这个函数会为该宏观块内的所有移动类型，找到最佳的可通行点（即“块内偏移量”）
 		CalculateBlockOffsets(maxBlockIdx - i, threadNum);
-
+	// 这是线程屏障，也是整个函数的“中场休息”点。
 	pathBarrier->wait();
-
+	// while ((i = --costBlockNum) >= 0): 与第一阶段类似，线程们再次从另一个原子计数器 costBlockNum 中领取任务
 	while ((i = --costBlockNum) >= 0)
+		// 每个线程根据领到的块索引，调用 EstimatePathCosts 函数。这个函数会计算从当前块移动到其所有相邻块的通行成本
 		EstimatePathCosts(maxBlockIdx - i, threadNum);
 }
 
+// 对于单个指定的宏观块 (blockIdx)，
+// 此函数的核心职责是为游戏中的每一种移动类型 (MoveDef) 都计算出该块内的最佳通行点（即“Offset”），并将结果存储起来。
+// blockIdx: 传入的参数，代表当前线程需要处理的那个宏观块的一维索引。
+// threadNum: 当前工作线程的ID
 void PathingState::CalculateBlockOffsets(unsigned int blockIdx, unsigned int threadNum)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	//  将一维的块索引 blockIdx 转换为二维的块坐标 blockPos 
+	// (例如，索引 65 可能会被转换为坐标 (1, 1))。后续的计算都需要使用二维坐标
 	const int2 blockPos = BlockIdxToPos(blockIdx);
-
+	// 这部分代码负责向加载屏幕报告计算进度。
 	if (threadNum == 0 && blockIdx >= nextOffsetMessageIdx) {
 		nextOffsetMessageIdx = blockIdx + blockStates.GetSize() / 16;
 		clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(BLOCK_SIZE | (blockIdx << 8)));
 	}
-
+	// 核心循环：为每种移动类型计算偏移
+	// for (...): 循环遍历游戏中所有已定义的移动类型 (MoveDef)。
+	// const MoveDef* md = ...: 在循环的每一次迭代中，获取一个具体的移动类型定义，例如“坦克移动”、“步兵移动”或“舰船移动”。
 	for (unsigned int i = 0; i < moveDefHandler.GetNumMoveDefs(); i++) {
 		const MoveDef* md = moveDefHandler.GetMoveDefByPathType(i);
-
+		// 调用我们之前讨论过的 FindBlockPosOffset 函数。这个函数会针对当前的移动类型 md 和宏观块 blockPos，
+		// 在该块内部（例如1024个精细方格中）进行搜索，找到一个最佳的可通行点。
 		//LOG("TK PathingState::InitBlocks: blockStates.peNodeOffsets %d now %d looking up %d", i, blockStates.peNodeOffsets[md->pathType].size(), blockIdx);
 		blockStates.peNodeOffsets[md->pathType][blockIdx] = FindBlockPosOffset(*md, blockPos.x, blockPos.y, threadNum);
 		// LOG("UPDATED blockStates.peNodeOffsets[%d][%d] = (%d, %d) : (%d, %d)"
@@ -384,33 +406,59 @@ void PathingState::CalculateBlockOffsets(unsigned int blockIdx, unsigned int thr
 /**
  * Move around the blockPos a bit, so we `surround` unpassable blocks.
  */
+/**
+ * 这个函数是预计算阶段中的一个关键“工人”函数。它的核心任务是，
+ * 对于一个给定的宏观地图块（例如一个 16x16 或 32x32 的区域）和一种特定的移动类型（MoveDef），
+ * 在该块内部找到一个“最佳”的可通行点。
+ * 这个“最佳点”就是所谓的 Offset (偏移量)，它将作为低分辨率寻路器 (PathEstimator) 在该块的“出入口”或“代表点”。
+ * moveDef: 传入单位的“物理规则书”，包含了尺寸、地形适应性等信息。
+ * blockX, blockZ: 正在被处理的宏观块的二维坐标。
+*/
 int2 PathingState::FindBlockPosOffset(const MoveDef& moveDef, unsigned int blockX, unsigned int blockZ, int threadNum) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// lower corner position of block
+	// lowerX, lowerZ: 计算出这个宏观块在高精度地图上的左下角坐标。
 	const unsigned int lowerX = blockX * BLOCK_SIZE;
 	const unsigned int lowerZ = blockZ * BLOCK_SIZE;
+	//  计算这个宏观块包含多少个精细方格。
 	const unsigned int blockArea = (BLOCK_SIZE * BLOCK_SIZE) / SQUARE_SIZE;
-
+	// 初始化“最佳位置”为这个宏观块的几何中心点。>> 1 是  / 2 的高效写法。这只是一个默认值，如果找不到任何可通行的点，函数就会返回这个中心点。
 	int2 bestPos(lowerX + (BLOCK_SIZE >> 1), lowerZ + (BLOCK_SIZE >> 1));
 	float bestCost = std::numeric_limits<float>::max();
 
 	// same as above, but with squares sorted by their baseCost
 	// s.t. we can exit early when a square exceeds our current
 	// best (from testing, on avg. 40% of blocks can be skipped)
+	// : 注释解释了这段代码的优化原理：通过遍历一个预先按基础成本（baseCost）排好序的列表，
+	// 当检测点的基础成本已经超过当前找到的最佳总成本时，就可以提前退出循环。
+	// for (...): 这里的循环并不是随意遍历块内的所有方格，
+	// 而是遍历 offsetBlocksSortedByCost 这个预先计算并排好序的列表。这个列表中的方格是按照离块中心由近及远的顺序排列的。
 	for (const SOffsetBlock& ob: offsetBlocksSortedByCost) {
+		// ob.cost: 当前被检测方格的基础成本（即离中心的距离平方）。
+		// bestCost: 目前为止找到的最佳点的总成本（距离成本 + 地形成本）。
+		// 逻辑: 如果当前点的基础距离成本就已经比我们找到的最佳点的总成本还要高，
+		// 那么这个点以及列表中所有排在它后面的点（因为它们更远，基础成本更高）就绝对不可能是更好的选择了。
+		// 因此，直接 break 退出循环，避免了对块内大量较远方格的无效检查。
 		if (ob.cost >= bestCost)
 			break;
-
+		// 计算出当前被检测方格在高精度地图上的绝对坐标。
 		const int2 blockPos(lowerX + ob.offset.x, lowerZ + ob.offset.y);
+		// 获取该方格的地形速度修正系数。
 		const float speedMod = CMoveMath::GetPosSpeedMod(moveDef, blockPos.x, blockPos.y);
 
 		//assert((blockArea / (0.001f + speedMod) >= 0.0f);
+		// 计算该方格的总成本。它由两部分组成：ob.cost (基础距离成本) + (blockArea / ...) 
+		// (地形惩罚成本)。地形越差（speedMod 越小），惩罚成本越高。
 		const float cost = ob.cost + (blockArea / (0.001f + speedMod));
-
+		// 即使一个点的基础距离成本通过了第一层检查，但在加上了高昂的地形成本后，其总成本也可能超过了当前最优值。
+		// 在这种情况下，就用 continue 跳过对这个点最昂贵的物理阻挡检查，直接进入下一个循环。
 		if (cost >= bestCost)
 			continue;
-
+		// 这是最终的有效性验证，也是计算上最昂贵的一步，所以放在最后。
+		// !CMoveMath::IsBlockedStructure(...): 检查该点是否没有被静态建筑等物体阻挡。
+		// !moveDef.IsInExitOnly(...): 检查该点是否没有位于“仅允许离开”的特殊区域。
+		// bestCost = cost; bestPos = blockPos;: 如果所有检查都通过，说明找到了一个更好的可通行点，于是更新 bestCost 和 bestPos。
 		if (!CMoveMath::IsBlockedStructure(moveDef, blockPos.x, blockPos.y, nullptr, threadNum)
 				&& !moveDef.IsInExitOnly(blockPos.x, blockPos.y)) {
 			bestCost = cost;
@@ -425,8 +473,9 @@ int2 PathingState::FindBlockPosOffset(const MoveDef& moveDef, unsigned int block
 void PathingState::EstimatePathCosts(unsigned int blockIdx, unsigned int threadNum)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 将一维的块索引 blockIdx 转换为二维的块坐标 blockPos。这是后续所有计算的基础。
 	const int2 blockPos = BlockIdxToPos(blockIdx);
-
+	// 部分代码负责向加载屏幕报告计算进度，逻辑与 CalculateBlockOffsets 中的类似
 	if (threadNum == 0 && blockIdx >= nextCostMessageIdx) {
 		nextCostMessageIdx = blockIdx + blockStates.GetSize() / 16;
 
@@ -436,10 +485,16 @@ void PathingState::EstimatePathCosts(unsigned int blockIdx, unsigned int threadN
 		clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(0x1 | BLOCK_SIZE | (blockIdx << 8)));
 		loadscreen->SetLoadMessage(calcMsg, (blockIdx != 0));
 	}
-
+	// 这是函数的核心循环，也是其主要工作所在
+	// 循环遍历游戏中所有已定义的移动类型 (MoveDef)。
 	for (unsigned int i = 0; i < moveDefHandler.GetNumMoveDefs(); i++) {
 		const MoveDef* md = moveDefHandler.GetMoveDefByPathType(i);
-
+		// CalcVertexPathCosts(...): 这是工作的委托。EstimatePathCosts 本身不执行最底层的计算，而是将任务分派给辅助函数 CalcVertexPathCosts
+		// CalcVertexPathCosts 的作用:
+		// 	这个辅助函数会接收当前的移动类型 md 和块坐标 blockPos。
+		//  它会遍历当前块的所有相邻块。
+		//  对于每一个相邻块，它会执行一次高精度寻路，计算从当前块的Offset（在阶段一已算出）移动到相邻块的Offset所需的精确成本。
+		//  最后，它将这个计算出的成本值存入巨大的 vertexCosts 数组中。
 		CalcVertexPathCosts(*md, blockPos, threadNum);
 	}
 }
@@ -447,23 +502,48 @@ void PathingState::EstimatePathCosts(unsigned int blockIdx, unsigned int threadN
 /**
  * Calculate costs of paths to all vertices connected from the given block
  */
+/**
+ * 它的核心职责是，对于一个给定的宏观块 (block)，检查并确定从这个块出发，
+ * 连接到其周围8个相邻块的“道路”中，有哪些因为地图变化而需要重新计算通行成本，
+ * 然后为每一条需要重算的“道路”调用另一个“工人”函数 (CalcVertexPathCost) 去完成实际的计算工作。
+ * moveDef: 传入当前要为其计算成本的单位移动类型。
+ * block: 当前要处理的宏观块的二维坐标。
+ * threadNum: 执行此代码的线程ID。
+*/
 void PathingState::CalcVertexPathCosts(const MoveDef& moveDef, int2 block, unsigned int threadNum)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// see GetBlockVertexOffset(); costs are bi-directional and only
 	// calculated for *half* the outgoing edges (while costs for the
 	// other four directions are stored at the adjacent vertices)
+
+	// 这段注释解释了一个重要的性能优化：对于非方向性寻路，从A块到B块的成本与从B块到A块的成本是相同的。
+	// 因此，系统只需要计算并存储一半方向的成本，另一半可以从邻居块那里查询到，节省了50%的计算和存储。
+	// auto idx = ...: 将二维的 block 坐标转换为一维索引 idx。
 	auto idx = BlockPosToIdx(block);
+	// 中读取当前块的标志
+	// 如果 moveDef.allowDirectionalPathing 为 true: 成本是单向的（A->B != B->A）。因此，必须考虑所有8个方向的连接。使用 PATH_DIRECTIONS_MASK 
+	// 如果为 false: 成本是双向的。因此，只需要计算其中4个方向的连接。使用 PATH_DIRECTIONS_HALF_MASK (00001111二进制) 进行“与”运算，只保留需要由当前块负责计算的那一半方向。
 	const uint8_t nodeLinksObsoleteFlags = blockStates.nodeLinksObsoleteFlags[idx]
 								  		 & (moveDef.allowDirectionalPathing) ? PATH_DIRECTIONS_MASK : PATH_DIRECTIONS_HALF_MASK;
 
 	int pathdir = 0;
+	// 讲解: 这段代码遍历8个方向，并为需要更新的方向分派计算任务。
+	// for (int checkBit = 1; ...): 这是一个巧妙的循环，用于遍历位掩码中的每一位。
+	// checkBit 的值在每次循环中依次为 1 (00000001), 2 (00000010), 4 (00000100), ...，正好对应每一个方向的标志位。
+	// ++pathdir: 与此同时，pathdir 计数器从0递增到7，与 checkBit 代表的方向（PATHDIR_LEFT, PATHDIR_LEFT_UP, ...）保持同步。
 	for (int checkBit = 1; checkBit <= PATHDIR_LEFT_DOWN_MASK; checkBit <<= 1, ++pathdir) {
+		//  使用位与 (&) 运算，检查在第一步中过滤出的 nodeLinksObsoleteFlags 中，当前方向对应的位是否为1。如果为1，说明这个方向的连接需要重新计算。
 		if (nodeLinksObsoleteFlags & checkBit)
+			// 如果需要重算，就调用“工人”函数 CalcVertexPathCost，将移动类型、当前块坐标、需要计算的具体方向等信息传递过去，让它执行真正的高精度寻路计算。
 			CalcVertexPathCost(moveDef, block, pathdir, threadNum);
 	}
 }
 
+/**
+ * 为一个特定的单位移动类型，精确计算出从一个宏观块移动到其旁边某一个相邻宏观块的真实通行成本。
+ * 它通过执行一次小范围、高精度的A*搜索来完成这个任务，并将计算结果（一个浮点数成本值）存入巨大的 vertexCosts 数组中。
+*/
 void PathingState::CalcVertexPathCost(
 	const MoveDef& moveDef,
 	int2 parentBlockPos,
@@ -472,7 +552,9 @@ void PathingState::CalcVertexPathCost(
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const int2 childBlockPos = parentBlockPos + PE_DIRECTION_VECTORS[pathDir];
-
+	// childBlockPos: 根据传入的父块坐标 parentBlockPos 和方向 pathDir，计算出相邻的子块坐标。
+	// parentBlockIdx, childBlockIdx: 将父子块的二维坐标转换为一维索引，用于访问数组。
+	// parentBlockIdx 就是当前区块的坐标 childBlockIdx 是邻近区块坐标
 	const unsigned int parentBlockIdx = BlockPosToIdx(parentBlockPos);
 	const unsigned int  childBlockIdx = BlockPosToIdx( childBlockPos);
 
@@ -486,13 +568,15 @@ void PathingState::CalcVertexPathCost(
 	// 		, childBlockIdx
 	// 		, mapDimensionsInBlocks.y
 	// 		);
-
+	// 这段代码计算出本次计算结果将要存储在 vertexCosts 这个一维大数组中的精确位置。
+	// 它通过移动类型ID、父块ID和方向ID层层定位，确保每个成本值都有一个唯一的存储槽。
 	const unsigned int  vertexCostIdx =
 		moveDef.pathType * mapBlockCount * PATH_DIRECTION_VERTICES +
 		parentBlockIdx * PATH_DIRECTION_VERTICES +
 		pathDir;
 
 	// outside map?
+	// 这是一个边界检查。如果子块位于地图之外，那么这条路显然不通，直接将成本设为无穷大并退出，避免无效计算。
 	if ((unsigned)childBlockPos.x >= mapDimensionsInBlocks.x || (unsigned)childBlockPos.y >= mapDimensionsInBlocks.y) {
 		vertexCosts[vertexCostIdx] = PATHCOST_INFINITY;
 		return;
@@ -500,13 +584,17 @@ void PathingState::CalcVertexPathCost(
 
 
 	// start position within parent block, goal position within child block
+	// 这是连接预计算第一阶段和第二阶段的关键。它从 peNodeOffsets 数组中，
+	// 取出在 CalculateBlockOffsets 阶段为父块和子块计算好的“最佳通行点”（Offsets）。
 	const int2 parentSquare = blockStates.peNodeOffsets[moveDef.pathType][parentBlockIdx];
 	const int2  childSquare = blockStates.peNodeOffsets[moveDef.pathType][ childBlockIdx];
-
+	//  将整型的网格坐标 parentSquare 和 childSquare 转换为高精度的浮点数世界坐标，作为接下来高精度寻路的起点和终点。
 	const float3 startPos = SquareToFloat3(parentSquare.x, parentSquare.y);
 	const float3  goalPos = SquareToFloat3( childSquare.x,  childSquare.y);
 
 	// keep search exactly contained within the two blocks
+	// 创建一个矩形搜索约束对象 pfDef。这个对象会把即将进行的高精度搜索严格限制在父块和子块所组成的微小矩形区域内，
+	// 极大地缩小了搜索范围，保证了计算速度
 	CRectangularSearchConstraint pfDef(startPos, goalPos, 0.0f, BLOCK_SIZE);
 
 	// LOG("TK PathingState::CalcVertexPathCost: (%d,%d -> %d,%d) (%d,%d -> %d,%d [%d])"
@@ -522,6 +610,8 @@ void PathingState::CalcVertexPathCost(
 	// note: PE itself should ensure this never happens to begin with?
 	//
 	// blocked goal positions are always early-outs (no searching needed)
+	// 这是另一个重要的优化。在启动昂贵的A*搜索之前，先快速检查一下寻路的起点或终点（即那两个Offset点）是否正好被一个静态建筑阻挡了。
+	// 如果是，同样直接将成本设为无穷大并退出。
 	const bool strtBlocked = ((CMoveMath::IsBlocked(moveDef, startPos, nullptr, threadNum) & CMoveMath::BLOCK_STRUCTURE) != 0);
 	const bool goalBlocked = pfDef.IsGoalBlocked(moveDef, CMoveMath::BLOCK_STRUCTURE, nullptr, threadNum);
 
@@ -531,16 +621,24 @@ void PathingState::CalcVertexPathCost(
 	}
 
 	// find path from parent to child block
+	// 讲解: 设置一系列标志来配置这次高精度搜索的行为。
+	// testMobile = false: 忽略地图上的移动单位，因为预计算只考虑静态地形和建筑
+	// needPath = false: 我们只需要最终的成本值，不需要具体的路径点列表，这能节省内存和处理时间
+	// exactPath = true: 要求必须精确到达目标点，不允许“差不多就行”的结果
+	// pfDef.skipSubSearches = true; 在分层寻路中，一个低分辨率寻路器有时会调用高分辨率寻路器来验证一小段路径的可行性（这被称为“子搜索”）。将此标志设为 true 是为了防止无限递归。因为当前这个函数本身就是一个高精度子搜索，它不应该再去调用其他子搜索。
+	// pfDef.dirIndependent = true; 作用: true 告诉寻路器，在这次特定的子搜索中，可以认为移动成本与单位的前进方向无关，以简化计算。虽然整个系统支持方向性寻路，但在这个小范围的、点对点的成本计算中，可以忽略方向性带来的细微差异。
 	pfDef.skipSubSearches = true;
 	pfDef.testMobile      = false;
 	pfDef.needPath        = false;
 	pfDef.exactPath       = true;
 	pfDef.dirIndependent  = true;
-
+	// 这是函数的核心动作。它调用 pathFinders 列表中对应当前线程的那个高精度寻路器 (CPathFinder)，
+	// 发起一次寻路请求。CPathFinder 会在 pfDef 限定的小范围内，执行一次完整的A*网格搜索，并返回结果。
 	IPath::Path path;
 	IPath::SearchResult result = pathFinders[threadNum]->GetPath(moveDef, pfDef, nullptr, startPos, path, MAX_SEARCHED_NODES_PF >> 2);
 
 	// store the result
+	// if (result == IPath::Ok): 检查高精度搜索是否成功找到了一条路径。
 	if (result == IPath::Ok) {
 		vertexCosts[vertexCostIdx] = path.pathCost;
 	} else {

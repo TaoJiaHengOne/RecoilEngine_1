@@ -712,14 +712,24 @@ bool MoveDef::TestMovePositionForObjects(
 	// return ((blockBits & CMoveMath::BLOCK_STRUCTURE) == 0);
 }
 
+// 这个函数的核心目标是判断一个单位如果移动到某个指定位置，其完整的占地面积（footprint）是否会与地图上被标记为“仅允许离开”
+// （Exit Only）的特殊区域发生重叠。
+// “仅允许离开”区域通常用于工厂的出口。新生产的单位会从这个区域出现，系统必须允许它离开，
+// 但同时必须禁止任何其他单位（或者该单位自己）再进入这个区域。这个函数就是实现这种“单行道”规则的关键。
+// testMovePos: 世界坐标
 bool MoveDef::IsInExitOnly(const float3 testMovePos) const {
+	// 这两行代码将一个高精度的、浮点数类型的世界坐标 testMovePos，通过除以 SQUARE_SIZE 并取整，
+	// 转换为一个离散的、整数类型的地图网格坐标 (xmid, zmid)
 	const int xmid = int(testMovePos.x / SQUARE_SIZE);
 	const int zmid = int(testMovePos.z / SQUARE_SIZE);
-
+	//  然后，它调用自己的另一个版本（网格坐标版本），将转换后的坐标传递过去，以执行真正的检查逻辑。
 	return IsInExitOnly(xmid, zmid);
 }
-
+// 检查单位的完整占地面积是否与“仅允许离开”区域重叠。
 bool MoveDef::IsInExitOnly(int xmid, int zmid) const {
+	// 讲解: 这段代码并不是只检查中心点 (xmid, zmid)。它根据当前 MoveDef 中定义的单位半尺寸 xsizeh 和 zsizeh，
+	// 计算出如果单位中心位于 (xmid, zmid)，其完整的矩形占地面积会覆盖从 (xmin, zmin) 到 (xmax, zmax) 的所有方格。
+	// std::max 和 std::min 用于确保计算出的范围不会超出地图边界。
 	const int xmin = std::max(xmid - xsizeh, 0);
 	const int zmin = std::max(zmid - zsizeh, 0);
 	const int xmax = std::min(xmid + xsizeh, mapDims.mapxm1);

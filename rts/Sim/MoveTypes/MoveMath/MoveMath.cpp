@@ -591,9 +591,19 @@ void CMoveMath::FloodFillRangeIsBlocked(const MoveDef& moveDef, const CSolidObje
 	}
 }
 
+// 这个函数的作用是检查一个指定的矩形区域内，是否存在任何一个被标记为“仅允许离开” (Exit Only) 的方格。它被 MoveDef::IsInExitOnly 调用，
+// 用于判断一个单位的完整占地面积是否与工厂出口等特殊区域重叠。
+// for 循环的步长是 += 2 而不是 += 1。这意味着它在检查时特意跳过了某些格子。
+// 这不是一个bug，而是一项基于底层数据结构的关键性能优化。
+// 原因：庭院图 (Yardmap) 的数据存储方式
+// 低分辨率定义: 在单位的定义文件中，庭院图（Yardmap）的数据默认是以半精度（half-resolution）定义的。
+// 这意味着，源数据中的一个点，实际上对应了最终高精度地图上的一个 2x2 的方格区域。
+// 2x2 上采样 (Upsampling): 在游戏加载并创建单位的庭院图时，系统会将这个低精度的定义进行“上采样”。
+// 一个低精度点的值（例如 YARDMAP_EXITONLY）会被复制到高精度碰撞图上的整个 2x2 区域。
 bool CMoveMath::RangeHasExitOnly(int xmin, int xmax, int zmin, int zmax, const ObjectCollisionMapHelper& object) {
 	for (int z = zmin; z <= zmax; z += FOOTPRINT_ZSTEP) {
 		for (int x = xmin; x <= xmax; x += FOOTPRINT_XSTEP)
+			// 检查这个格子有没有被标记为 Exit Only
 			if (object.IsExitOnlyAt(x, z)) return true;
 	}
 	return false;
