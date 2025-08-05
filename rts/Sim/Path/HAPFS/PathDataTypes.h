@@ -278,7 +278,23 @@ public:
 
 	/// 节点的位掩码，包含 PATHOPT_{OPEN, ..., OBSOLETE} 等标志
 	std::vector<std::uint8_t> nodeMask;
-
+	/**
+		nodeLinksObsoleteFlags 是一个 std::uint8_t（8位无符号整数）类型的位掩码。它的核心作用是标记一个宏观块（Node）到其8个相邻邻居的连接（Link）的预计算成本是否已经过时（Obsolete）。
+		当游戏中的地形发生变化时（例如，爆炸产生了一个弹坑），这个区域以及周围的路径成本就需要重新计算。系统不会盲目地重新计算所有路径，而是通过这个标志位来精确标记哪些“道路”需要维修。
+		nodeLinksObsoleteFlags 的8个位中的每一个位都精确地对应一个方向。如果某个位被设置为 1，就意味着从当前块到该方向邻居的通行成本已经失效，需要重新计算。
+		位的含义
+		这些位的定义来自于您之前翻译过的 rts/Sim/Path/HAPFS/PathConstants.h 文件。下面是每个位代表的具体含义：
+		| 位 (Bit) | 十六进制值 | C++ 常量 | 方向 | 含义 (当位为1时) |
+		| :--- | :--- | :--- | :--- | :--- |
+		| 0 | 0x01 | PATHDIR_LEFT_MASK | 左 | 到左侧邻居的连接成本已过时。 |
+		| 1 | 0x02 | PATHDIR_LEFT_UP_MASK | 左上 | 到左上角邻居的连接成本已过时。 |
+		| 2 | 0x04 | PATHDIR_UP_MASK | 上 | 到上方邻居的连接成本已过时。 |
+		| 3 | 0x08 | PATHDIR_RIGHT_UP_MASK | 右上 | 到右上角邻居的连接成本已过时。 |
+		| 4 | 0x10 | PATHDIR_RIGHT_MASK | 右 | 到右侧邻居的连接成本已过时。 |
+		| 5 | 0x20 | PATHDIR_RIGHT_DOWN_MASK| 右下 | 到右下角邻居的连接成本已过时。 |
+		| 6 | 0x40 | PATHDIR_DOWN_MASK | 下 | 到下方邻居的连接成本已过时。 |
+		| 7 | 0x80 | PATHDIR_LEFT_DOWN_MASK | 左下 | 到左下角邻居的连接成本已过时。 |
+	 */
 	/// 标记节点的某些方向链接为过时的标志
 	std::vector<std::uint8_t> nodeLinksObsoleteFlags;
 
