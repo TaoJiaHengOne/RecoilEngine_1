@@ -226,6 +226,15 @@ public:
 
 
 	//If this struct is changed, please fix CReadMap::CalcTypemapChecksum accordingly
+	/*
+	- name - 地形类型的名称（字符串）
+	- hardness - 地形硬度值（浮点数）
+	- tankSpeed - 坦克在该地形上的移动速度（对应配置中的"TankMoveSpeed"）
+	- kbotSpeed - 机器人单位在该地形上的移动速度（对应配置中的"KbotMoveSpeed"）
+	- hoverSpeed - 悬浮单位在该地形上的移动速度（对应配置中的"HoverMoveSpeed"）
+	- shipSpeed - 舰船在该地形上的移动速度（对应配置中的"ShipMoveSpeed"）
+	- receiveTracks - 布尔值，表示该地形是否会显示单位移动轨迹
+	*/
 	struct TerrainType {
 		std::string name;
 		float hardness;

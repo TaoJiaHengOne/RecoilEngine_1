@@ -37,7 +37,10 @@ MoveTypes::CheckCollisionQuery::CheckCollisionQuery(const MoveDef* refMoveDef, f
 {
 	UpdateElevationForPos(pos);
 }
-
+/**
+ * 根据地图方格坐标更新碰撞查询对象的高度和水中状态
+ * 判断是否在水里 增加或者删除一些flag
+*/
 void MoveTypes::CheckCollisionQuery::UpdateElevationForPos(int2 sqr) {
 	const float mapHeight = readMap->GetMaxHeightMapSynced()[sqr.y * mapDims.mapx + sqr.x];
 	pos.y = std::max(mapHeight, -moveDef->waterline);
@@ -160,11 +163,38 @@ float CMoveMath::GetPosSpeedMod(const MoveDef& moveDef, unsigned xSquare, unsign
 }
 
 /* Check if a given square-position is accessible by the MoveDef footprint. */
+/*
+  函数目的： 检查给定方格位置是否可被MoveDef占地面积访问，不检查速度修正（即不考虑地形因素如坡度、水深等）
+
+  参数说明：
+  - moveDef: 移动定义，包含单位的占地面积信息
+  - xSquare, zSquare: 要检查的中心方格坐标
+  - collider: 碰撞检测对象（可以为nullptr）
+  - thread: 线程ID，用于多线程安全
+*/
 CMoveMath::BlockType CMoveMath::IsBlockedNoSpeedModCheck(const MoveDef& moveDef, int xSquare, int zSquare, const CSolidObject* collider, int thread)
 {
+	/*
+	逻辑分析：
+	- 条件判断： 检查 collider 参数是否为空指针
+	- 分支1（collider != nullptr）： 使用现有的固体对象创建碰撞查询
+		- 会复制该对象的位置、物理状态、移动定义等信息
+		- 用于检查现有单位是否能移动到新位置
+	- 分支2（collider == nullptr）： 仅使用MoveDef创建碰撞查询
+		- 创建虚拟的碰撞查询对象
+		- 用于检查某种类型的单位是否能在该位置存在
+	*/
 	MoveTypes::CheckCollisionQuery collisionQuery = (collider != nullptr)
 			? MoveTypes::CheckCollisionQuery(collider)
 			: MoveTypes::CheckCollisionQuery(&moveDef);
+	/*
+		功能解析：
+		- int2{xSquare, zSquare}： 创建二维整数坐标
+		- UpdateElevationForPos： 更新碰撞查询对象在指定位置的高度和物理状态
+			- 从高度图获取该位置的地形高度
+			- 确定单位是否在水中（设置PSTATE_BIT_INWATER标志）
+			- 计算正确的Y坐标（考虑waterline等因素）
+	*/
 	collisionQuery.UpdateElevationForPos(int2{xSquare, zSquare});
 
 	return RangeIsBlocked(xSquare - moveDef.xsizeh, xSquare + moveDef.xsizeh, zSquare - moveDef.zsizeh, zSquare + moveDef.zsizeh, &collisionQuery, thread);
@@ -310,30 +340,61 @@ bool CMoveMath::IsNonBlocking(const CSolidObject* collidee, const MoveTypes::Che
 	return false;
 }
 
+/**
+ * 功能：确定一个固体对象对碰撞查询单位的阻挡类型
+ * 这是碰撞检测系统的核心函数，将对象分类为不同的阻挡类型，
+ * 以便移动系统做出相应的路径规划决策
+ * 
+ * 参数说明：
+ * - collidee: 被检测的固体对象（潜在的阻挡物）
+ * - collider: 碰撞查询对象（要移动的单位的信息）
+ * 
+ * 返回值：BlockType枚举，表示阻挡类型
+ */
 CMoveMath::BlockType CMoveMath::ObjectBlockType(const CSolidObject* collidee, const MoveTypes::CheckCollisionQuery* collider)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 第一步：检查是否为非阻挡对象
+	// IsNonBlocking函数检查多种不阻挡的情况：
+	// - 对象是查询单位自己
+	// - 对象未启用碰撞
+	// - 对象在地图边界外
+	// - 对象未在阻挡图上标记
+	// - 潜艇vs水面对象的特殊规则
+	// - 垂直分离情况（如：潜艇穿过水面建筑）
 	if (IsNonBlocking(collidee, collider))
 		return BLOCK_NONE;
 
+	// 第二步：处理不可移动对象（建筑物、地形特征等）
 	if (collidee->immobile)
+		// 检查碰撞单位是否有足够的碾压力来摧毁该对象
+		// CrushResistant检查：collidee->crushResistance > collider->moveDef->crushStrength
+		// 如果无法碾压，则视为结构性阻挡；如果可以碾压，则不阻挡
 		return ((CrushResistant(*(collider->moveDef), collidee))? BLOCK_STRUCTURE: BLOCK_NONE);
 
-	// mobile obstacle, must be a unit
+	// 第三步：处理可移动对象（单位）
+	// 将固体对象强制转换为单位对象，因为只有单位是可移动的
 	const CUnit* u = static_cast<const CUnit*>(collidee);
 	const AMoveType* mt = u->moveType;
 
-	// if moving, unit is probably following a path
+	// 第四步：检查单位是否正在移动
+	// 正在移动的单位可能正在执行移动命令或跟随路径
+	// 这类单位通常会自主避让，所以标记为BLOCK_MOVING
 	if (u->IsMoving())
 		return BLOCK_MOVING;
 
-	// not moving and not pushable, treat as blocking
+	// 第五步：检查静止单位是否可推动
+	// IsPushResistant检查单位是否拒绝被推动
+	// 不可推动的静止单位应被视为结构性阻挡
 	if (mt->IsPushResistant())
 		return BLOCK_STRUCTURE;
 
-	// otherwise, unit is idling (no orders) or busy with a command
-	// being-built units never count as idle, but should perhaps be
-	// considered BLOCK_STRUCTURE
+	// 第六步：处理可推动的静止单位
+	// 区分闲置单位和忙碌单位：
+	// - 闲置单位(IsIdle)：没有任何命令，容易被推动 -> BLOCK_MOBILE
+	// - 忙碌单位：正在执行命令但未移动（如建造、攻击），较难被推动 -> BLOCK_MOBILE_BUSY
+	// 注意：正在建造的单位永远不会被认为是闲置的，
+	// 但在当前实现中它们被归类为BLOCK_MOBILE_BUSY而不是BLOCK_STRUCTURE
 	return ((u->IsIdle())? BLOCK_MOBILE: BLOCK_MOBILE_BUSY);
 }
 
@@ -355,16 +416,26 @@ CMoveMath::BlockType CMoveMath::SquareIsBlocked(const MoveDef& moveDef, int xSqu
 	return r;
 }
 
+/*
+  功能：检查指定矩形范围内是否存在阻挡，这是单位占地面积碰撞检测的核心函数。
+
+  参数说明：
+  - xmin, xmax, zmin, zmax: 要检查的矩形范围（地图方格坐标）
+  - collider: 碰撞查询对象，包含单位信息
+  - thread: 线程ID，用于多线程安全
+*/
 CMoveMath::BlockType CMoveMath::RangeIsBlocked(int xmin, int xmax, int zmin, int zmax, const MoveTypes::CheckCollisionQuery* collider, int thread)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// 边界范围修正
 	xmin = std::max(xmin,                0);
 	zmin = std::max(zmin,                0);
 	xmax = std::min(xmax, mapDims.mapx - 1);
 	zmax = std::min(zmax, mapDims.mapy - 1);
-
+	// 功能：初始化阻挡类型为无阻挡，后续会通过位运算累积各种阻挡类型。
 	BlockType ret = BLOCK_NONE;
-	if (ThreadPool::inMultiThreadedSection) {
+	// - ThreadPool::inMultiThreadedSection：全局标志，指示当前是否在多线程环境中
+	if (ThreadPool::inMultiThreadedSection) { // 指示当前是否在多线程环境中
 		const int tempNum = gs->GetMtTempNum(thread);
 		ret = CMoveMath::RangeIsBlockedMt(xmin, xmax, zmin, zmax, collider, thread, tempNum);
 	} else {
@@ -395,9 +466,18 @@ CMoveMath::BlockType CMoveMath::RangeIsBlockedTempNum(int xmin, int xmax, int zm
 	return ret;
 }
 
+/*
+  功能：单线程版本的范围阻挡检测，检查指定矩形区域内的所有阻挡对象。
+
+  参数说明：
+  - xmin, xmax, zmin, zmax: 要检查的矩形范围
+  - collider: 碰撞查询对象
+  - tempNum: 临时编号，用于避免重复检查同一对象
+*/
 CMoveMath::BlockType CMoveMath::RangeIsBlockedSt(int xmin, int xmax, int zmin, int zmax, const MoveTypes::CheckCollisionQuery* collider, int tempNum)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	//  功能：初始化阻挡类型为无阻挡，后续通过位运算累积各种阻挡类型
 	BlockType ret = BLOCK_NONE;
 
 	// footprints are point-symmetric around <xSquare, zSquare>
@@ -405,11 +485,49 @@ CMoveMath::BlockType CMoveMath::RangeIsBlockedSt(int xmin, int xmax, int zmin, i
 		const int zOffset = z * mapDims.mapx;
 
 		for (int x = xmin; x <= xmax; x += FOOTPRINT_XSTEP) {
+			// 获取碰撞单元格
+			/*
+			1. groundBlockingObjectMap：全局地面阻挡对象图
+				- 将地图分割为网格，每个网格存储该位置的所有阻挡对象
+				- 空间分割优化，避免检查整个地图的所有对象
+			2. zOffset + x：计算1D索引
+				- 等价于 z * mapWidth + x
+				- 将2D坐标(x,z)转换为1D数组索引
+			3. GetCellUnsafeConst()：
+				- "Unsafe"：不进行边界检查，假定调用者已确保索引有效
+				- "Const"：返回只读引用
+				- 返回该位置的所有阻挡对象列表
+			4. BlockingMapCell：
+				- 通常是 std::vector<CSolidObject*>
+				- 存储该网格中的所有固体对象
+			*/
 			const CGroundBlockingObjectMap::BlockingMapCell& cell = groundBlockingObjectMap.GetCellUnsafeConst(zOffset + x);
 
 			for (size_t i = 0, n = cell.size(); i < n; i++) {
+				// 功能：遍历当前网格中的所有固体对象
 				CSolidObject* collidee = cell[i];
+				// 第454-455行：重复检查避免机制
+				/*
+				// 为什么需要避免重复检查？
+				// 考虑一个3x3的坦克占地面积：
+				//
+				//   [A][B][C]
+				//   [D][E][F]  ← 坦克占地
+				//   [G][H][I]
+				//
+				// 如果有一个大建筑跨越多个网格：
+				//   [建筑][建筑]
+				//   [建筑][建筑] ← 同一建筑出现在4个网格中
+				//
+				// 没有tempNum机制：会检查同一建筑4次
+				// 有tempNum机制：只检查第一次遇到时
 
+				tempNum的工作原理：
+				- 每次范围检查开始时，系统分配一个新的唯一tempNum
+				- 首次遇到对象时，对象的tempNum不等于当前tempNum
+				- 检查该对象，然后将其tempNum设置为当前值
+				- 再次遇到该对象时，tempNum相等，直接跳过
+				*/
 				if (collidee->tempNum == tempNum)
 					continue;
 
