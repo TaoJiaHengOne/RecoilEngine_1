@@ -95,6 +95,6 @@
         "**/docker-build": true,
         "**/docker-build-v2": true,
         "**/.cache": true, // 强烈建议排除编译输出目录
-        "**/doc": true // 排除索引缓存本身
+        // "**/doc": true // 排除索引缓存本身
     },
 }
