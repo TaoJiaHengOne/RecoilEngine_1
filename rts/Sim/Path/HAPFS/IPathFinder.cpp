@@ -262,79 +262,111 @@ IPath::SearchResult IPathFinder::GetPath(
 }
 
 
-// set up the starting point of the search
+// 初始化A*寻路搜索的核心函数 - 设置起始状态、检查早期退出条件、配置搜索参数并执行实际搜索
 IPath::SearchResult IPathFinder::InitSearch(const MoveDef& moveDef, const CPathFinderDef& pfDef, const CSolidObject* owner)
 {
+	// 启用Tracy性能分析器的详细分析区域，用于监控函数执行性能
 	RECOIL_DETAILED_TRACY_ZONE;
+	
+	// 初始化实际搜索起始方格坐标，默认使用块级起始位置
 	int2 square = mStartBlock;
 
+	// 检查是否为低分辨率寻路器（PathEstimator），BLOCK_SIZE > 1 表示多个地图方格组成一个搜索块
 	if (BLOCK_SIZE != 1){
+		// 如果存在父级共享状态缓冲区（通常用于分层寻路中的高低分辨率配合）
 		if (psBlockStates != nullptr)
+			// 使用共享状态缓冲区中针对特定移动类型预计算的节点偏移，获得更精确的起始位置
 			square = (*psBlockStates).peNodeOffsets[moveDef.pathType][mStartBlockIdx];
 		else
+			// 使用本地状态缓冲区中的预计算偏移，这些偏移考虑了不同移动类型的特殊需求
 			square = blockStates.peNodeOffsets[moveDef.pathType][mStartBlockIdx];
 	}
 
+	// 检查起始方格是否已经位于目标区域内，避免不必要的搜索
 	const bool isStartGoal = pfDef.IsGoal(square.x, square.y);
+	// 获取路径定义中是否允许起始位置在目标半径内的标志
 	const bool startInGoal = pfDef.startInGoalRadius;
 
+	// 获取是否允许原始路径搜索的标志（通常指直线路径或简单几何路径）
 	const bool allowRawPath = pfDef.allowRawPath;
+	// 获取是否允许默认路径搜索的标志（通常指完整的A*搜索）
 	const bool allowDefPath = pfDef.allowDefPath;
 
+	// 断言确保至少允许一种搜索方式，防止配置错误导致的死锁
 	assert(allowRawPath || allowDefPath);
 
-	// cleanup after the last search
+	// 清理上一次搜索的残留状态：重置脏块列表、清空开放队列、重置计数器
 	ResetSearch();
 
+	// 预定义可能的搜索结果数组：[0]=原始搜索失败, [1]=成功, [2]=默认搜索失败
 	IPath::SearchResult results[] = {IPath::CantGetCloser, IPath::Ok, IPath::CantGetCloser};
 
-	// although our starting square may be inside the goal radius, the starting coordinate may be outside.
-	// in this case we do not want to return CantGetCloser, but instead a path to our starting square.
+	// 优化检查：如果起始位置已在目标区域且配置允许，直接返回结果避免搜索开销
+	// 虽然起始方格在目标半径内，但起始坐标可能在半径外，此时不返回CantGetCloser而是返回到起始方格的路径
 	if (isStartGoal && startInGoal)
+		// 如果允许原始路径则返回Ok，否则返回CantGetCloser
 		return results[allowRawPath];
 
-	// mark and store the start-block; clear all bits except PATHOPT_OBSOLETE
+	// 初始化起始节点的A*算法状态：清除所有状态位但保留过时标记（用于缓存失效检测）
 	blockStates.nodeMask[mStartBlockIdx] &= PATHOPT_OBSOLETE;
+	// 将起始节点标记为开放状态，表示它在开放列表中待处理
 	blockStates.nodeMask[mStartBlockIdx] |= PATHOPT_OPEN;
+	// 设置起始节点的F成本为0（A*中的f(n) = g(n) + h(n)，起始点g=0，h稍后计算）
 	blockStates.fCost[mStartBlockIdx] = 0.0f;
+	// 设置起始节点的G成本为0（从起始点到自身的实际成本为0）
 	blockStates.gCost[mStartBlockIdx] = 0.0f;
+	// 更新全局F成本的最大值跟踪（用于搜索统计和调试）
 	blockStates.SetMaxCost(NODE_COST_F, 0.0f);
+	// 更新全局G成本的最大值跟踪（用于搜索统计和调试）
 	blockStates.SetMaxCost(NODE_COST_G, 0.0f);
 
+	// 将起始节点索引加入脏块列表，确保搜索结束后能正确重置其状态
 	dirtyBlocks.push_back(mStartBlockIdx);
 
-	// start a new search and add the starting block to the open-blocks-queue
+	// 初始化开放节点缓冲区：清空缓冲区准备存储新的搜索节点
 	openBlockBuffer.SetSize(0);
+	// 从缓冲区获取一个新的路径节点对象用于表示起始节点
 	PathNode* ob = openBlockBuffer.GetNode(openBlockBuffer.GetSize());
+		// 设置起始节点的F成本为0（总估计成本）
 		ob->fCost   = 0.0f;
+		// 设置起始节点的G成本为0（实际已走成本）
 		ob->gCost   = 0.0f;
+		// 存储起始节点的二维坐标位置
 		ob->nodePos = mStartBlock;
+		// 存储起始节点的一维数组索引，用于快速访问状态数组
 		ob->nodeNum = mStartBlockIdx;
+		// 检查起始位置是否为"仅出口"区域（某些特殊地形单位只能离开不能进入）
 		ob->exitOnly = moveDef.IsInExitOnly(mStartBlock.x, mStartBlock.y);
+	// 将配置好的起始节点加入开放列表优先队列，开始A*搜索过程
 	openBlocks.push(ob);
 
-	// mark starting point as best found position
-	// mGoalHeuristic = pfDef.Heuristic(square.x, square.y, BLOCK_SIZE);
+	// 计算并存储起始位置到目标的启发式距离估计（A*算法中的h值）
+	// 注释掉的旧代码：mGoalHeuristic = pfDef.Heuristic(square.x, square.y, BLOCK_SIZE);
+	// 使用多态的启发式函数，不同的寻路器子类可能有不同的启发式计算方法
 	mGoalHeuristic = GetHeuristic(moveDef, pfDef, square);
 
+	// 定义搜索类型的枚举常量，提高代码可读性
 	enum {
-		RAW = 0,
-		IPF = 1,
+		RAW = 0,    // 原始搜索索引（直线路径检测等快速方法）
+		IPF = 1,    // 完整搜索索引（标准A*算法）
 	};
 
-	// perform the search
+	// 执行两阶段搜索策略：首先尝试快速原始搜索，失败后再尝试完整搜索
+	// 第一阶段：如果允许原始路径，执行原始搜索（通常是直线可达性检测），否则直接标记为错误
 	results[RAW] = (allowRawPath                                )? DoRawSearch(moveDef, pfDef, owner): IPath::Error;
+	// 第二阶段：如果允许默认搜索且原始搜索失败，执行完整A*搜索，否则使用原始搜索的结果
 	results[IPF] = (allowDefPath && results[RAW] == IPath::Error)? DoSearch(moveDef, pfDef, owner): results[RAW];
 
+	// 优先返回成功的搜索结果：如果完整搜索成功，立即返回成功状态
 	if (results[IPF] == IPath::Ok)
 		return IPath::Ok;
+	// 如果找到了部分路径（目标块不等于起始块），返回部分搜索结果（可能是GoalOutOfRange等）
 	if (mGoalBlockIdx != mStartBlockIdx)
 		return results[IPF];
 
-	// if start and goal are within the same block but distinct squares (or
-	// considered a single point for search purposes), then we probably can
-	// not get closer and should return CGC *unless* the caller requested a
-	// raw search only
+	// 处理起始和目标在同一块内但为不同方格的特殊情况：
+	// 这种情况下通常无法更接近目标，应返回CantGetCloser，除非调用者仅请求原始搜索
+	// 复杂的布尔表达式计算最终返回值：考虑搜索类型限制和目标状态
 	return results[IPF + ((!allowRawPath || allowDefPath) && (!isStartGoal || startInGoal))];
 }
 
