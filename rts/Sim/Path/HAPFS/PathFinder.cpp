@@ -288,6 +288,10 @@ void CPathFinder::TestNeighborSquares(
 
 	#if ENABLE_DIAG_TESTS
 	const auto TestDiagSquare = [&](const int dirX, const int dirY, const int dirXY) {
+		// 对角线移动的限制条件：
+		// 1. 对角方格本身必须可通行
+		// 2. 如果起始方格没有被阻挡，则两个相邻的基础方向都必须可通行
+		// 3. 如果其实方格被阻挡, 即便对角方格被阻挡也允许通行(紧急脱困)
 		if (!CanTestSquareSM(dirXY) || (!startSquareBlocked && (!CanTestSquareSM(dirX) || !CanTestSquareSM(dirY))))
 			return;
 		if (!CanTestSquareIS(dirXY) && (                        !CanTestSquareIS(dirX) || !CanTestSquareIS(dirY)))
@@ -351,34 +355,40 @@ void CPathFinder::TestNeighborSquares(
 }
 
 bool CPathFinder::TestBlock(
-	const MoveDef& moveDef,
-	const CPathFinderDef& pfDef,
-	const PathNode* parentSquare,
-	const CSolidObject* owner,
-	const unsigned int pathOptDir,
-	const unsigned int blockStatus,
-	float speedMod
-) {
+	const MoveDef& moveDef,        // 移动定义（单位类型的移动参数）
+	const CPathFinderDef& pfDef,   // 寻路定义（本次寻路的参数）
+	const PathNode* parentSquare,  // 父节点（当前扩展的节点）
+	const CSolidObject* owner,     // 寻路单位
+	const unsigned int pathOptDir, // 移动方向（0-7，8个方向）
+	const unsigned int blockStatus,// 阻挡状态（预先计算的）
+	float speedMod                 // 速度修正（地形影响系数）
+)
+{
 	RECOIL_DETAILED_TRACY_ZONE;
 	testedBlocks++;
 
 	// initial calculations of the new block
+	// 计算邻居节点的坐标
 	const int2 square = parentSquare->nodePos + PF_DIRECTION_VECTORS_2D[pathOptDir];
 	const unsigned int sqrIdx = BlockPosToIdx(square);
 
 	// bounds-check
+	// 断言检查 检查父函数的计算
 	assert(static_cast<unsigned>(square.x) < nbrOfBlocks.x);
 	assert(static_cast<unsigned>(square.y) < nbrOfBlocks.y);
 	assert((blockStates.nodeMask[sqrIdx] & (PATHOPT_CLOSED | PATHOPT_BLOCKED)) == 0);
 	assert((blockStatus & MMBT::BLOCK_STRUCTURE) == 0);
 	assert(speedMod != 0.0f);
-
+	// 检查是否在"仅允许离开"区域
 	const bool exitOnlyStatus = moveDef.IsInExitOnly(square.x, square.y);
+	// // 如果父节点不在exit-only，但目标在, 不能从外部进入exit-only区域
 	if (!parentSquare->exitOnly && exitOnlyStatus) {
 		// Can't enter this way.
 		return true;
 	}
-
+    // 如果启用移动单位避让
+	// 根据阻挡类型 修改speedMod
+	// speedMod 会影响路径成本
 	if (pfDef.testMobile && moveDef.avoidMobilesOnPath) {
 		switch (blockStatus & squareMobileBlockBits) {
 			case (uint32_t(MMBT::BLOCK_MOBILE_BUSY) | uint32_t(MMBT::BLOCK_MOBILE) | uint32_t(MMBT::BLOCK_MOVING)):   // 111
@@ -401,37 +411,40 @@ bool CPathFinder::TestBlock(
 			} break;
 		}
 	}
-
+	// 热力图成本
 	const float heatCost  = (pfDef.testMobile) ? gPathHeatMap.GetHeatCost(square.x, square.y, moveDef, ((owner != nullptr)? owner->id: -1U)) : 0.0f;
 	//const float flowCost  = (pfDef.testMobile) ? (PathFlowMap::GetInstance())->GetFlowCost(square.x, square.y, moveDef, pathOptDir) : 0.0f;
+	// 额外成本
 	const float extraCost = blockStates.GetNodeExtraCost(square.x, square.y, pfDef.synced);
-
+	// 方向成本
 	const float dirMoveCost = (1.0f + heatCost) * PF_DIRECTION_COSTS[pathOptDir];
+	// 节点总成本
 	const float nodeCost = (dirMoveCost / speedMod) + extraCost;
 
-	const float gCost = parentSquare->gCost + nodeCost;                  // g
-	const float hCost = pfDef.Heuristic(square.x, square.y, BLOCK_SIZE); // h
-	const float fCost = gCost + hCost;                                   // f
+	const float gCost = parentSquare->gCost + nodeCost;                  // G = 父节点G值 + 边成本
+	const float hCost = pfDef.Heuristic(square.x, square.y, BLOCK_SIZE); // H = 启发式距离
+	const float fCost = gCost + hCost;                                   // F = G + H
 
-	if (blockStates.nodeMask[sqrIdx] & PATHOPT_OPEN) {
+	if (blockStates.nodeMask[sqrIdx] & PATHOPT_OPEN) { // 如果节点已在开放列表
 		// already in the open set, look for a cost-improvement
-		if (blockStates.fCost[sqrIdx] <= fCost)
+		if (blockStates.fCost[sqrIdx] <= fCost) // 如果现有路径更优 跳过这个节点
 			return true;
 
-		blockStates.nodeMask[sqrIdx] &= ~PATHOPT_CARDINALS;
+		blockStates.nodeMask[sqrIdx] &= ~PATHOPT_CARDINALS; // 清除方向标记
 	}
 
 	// if heuristic says this node is closer to goal than previous h-estimate, keep it
-	if (!pfDef.exactPath && hCost < mGoalHeuristic) {
+	if (!pfDef.exactPath && hCost < mGoalHeuristic) { // 如果是近似寻路且找到更接近目标的点
 		mGoalBlockIdx = sqrIdx;
 		mGoalHeuristic = hCost;
 	}
 
 	// store and mark this square as open (expanded, but not yet pulled from pqueue)
+	// 扩大节点缓冲区
 	openBlockBuffer.SetSize(openBlockBuffer.GetSize() + 1);
 	assert(openBlockBuffer.GetSize() < MAX_SEARCHED_NODES_PF);
 
-	PathNode* os = openBlockBuffer.GetNode(openBlockBuffer.GetSize());
+	PathNode* os = openBlockBuffer.GetNode(openBlockBuffer.GetSize());// 获取新节点
 		os->fCost   = fCost;
 		os->gCost   = gCost;
 		os->nodePos = square;
@@ -444,7 +457,7 @@ bool CPathFinder::TestBlock(
 
 	blockStates.fCost[sqrIdx] = os->fCost;
 	blockStates.gCost[sqrIdx] = os->gCost;
-	blockStates.nodeMask[sqrIdx] |= (PATHOPT_OPEN | pathOptDir);
+	blockStates.nodeMask[sqrIdx] |= (PATHOPT_OPEN | pathOptDir);// 标记为OPEN + 记录来源方向
 
 	dirtyBlocks.push_back(sqrIdx);
 	return true;
